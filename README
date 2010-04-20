@@ -1,0 +1,8 @@
+A prototype for an ipython frontend based on the Urwid library.
+
+Currently, functionality is of course very limited. Run 'python interpreterwidget.py'
+to get it to start; then you can type text into the box, and after hitting enter,
+it will be displayed above as highlighted python code.
+
+type 'q' and enter to exit.
+
