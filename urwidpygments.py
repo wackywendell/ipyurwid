@@ -21,13 +21,21 @@ class UrwidFormatter(Formatter):
                 default: True
         colors: number of colors to use (16, 88, or 256)
                 default: 256"""
-        Formatter.__init__(self, **options)
         self.usebold = options.get('usebold',True)
         self.usebg = options.get('usebg', True)
         colors = options.get('colors', 256)
         self.style_attrs = {}
-        self._setup_styles(colors)
+        Formatter.__init__(self, **options)
+        
+    @property
+    def style(self):
+        return self._style
     
+    @style.setter
+    def style(self, newstyle):
+        self._style = newstyle
+        self._setup_styles()
+        
     @staticmethod
     def _distance(col1, col2):
         r1, g1, b1 = col1
