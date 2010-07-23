@@ -111,7 +111,8 @@ class PromptPyEdit(widget.WidgetWrap):
     def set_prompt(self, prompt):
         self.promptbox.set_text(prompt)
         txt = self.promptbox.text
-        self.columns.column_types[0] = ('fixed', len(prompt))
+        
+        self.columns.column_types[0] = ('fixed', len(txt)   )
     
     def get_prompt(self):
         return self.promptbox.get_text()
@@ -127,7 +128,7 @@ class PromptPyEdit(widget.WidgetWrap):
 
 class TextGrid(widget.WidgetWrap):
     """Displays a list of strings as a grid, allowing only a given width."""
-    def __init__(self, texts=None, width = 10):
+    def __init__(self, texts=None, width = 15):
         """
         texts -- list of strings, unicode objects, or markup to be used in the 
                  cells. May be markup, but may not include newlines."""
@@ -165,9 +166,60 @@ class TextGrid(widget.WidgetWrap):
     
     @cellwidth.deleter
     def cellwidth(self):
-        self._w.cell_width = 10
+        self._w.cell_width = 15
         self._w._cache_maxcol = None # hack to invalidate caches
 
+class Switcher(widget.WidgetWrap):
+    def __init__(self, firstwidget=None):
+        if firstwidget is None:
+            firstwidget=urwid.Text('')
+            self._blank=True
+        else:
+            self._blank=False
+        
+        widget.WidgetWrap.__init__(self, firstwidget)
+    
+    @property
+    def widget(self):
+        if self._blank:
+            return None
+        return self._w
+    
+    @widget.setter
+    def widget(self, newwidget):
+        if newwidget is None:
+            del self.widget
+        else:
+            self._w = newwidget
+            self._blank = False
+        self._invalidate()
+    
+    @widget.deleter
+    def widget(self):
+        self._w = urwid.Text('')
+        self.blank = True
+        self._invalidate()
+    
+class UpperBox(widget.WidgetWrap):
+    def __init__(self, firstwidget=None):
+        self._divider = urwid.Divider(u'─')
+        self._switcher = Switcher(firstwidget)
+        mywidget = urwid.Pile([self._switcher, self._divider])
+        widget.WidgetWrap.__init__(self, mywidget)
+    @property
+    def widget(self):
+        return self._switcher.widget
+    
+    @widget.setter
+    def widget(self, newwidget):
+        self._switcher.widget = newwidget
+        self._invalidate()
+    
+    @widget.deleter
+    def widget(self):
+        del self._switcher.widget
+        self._invalidate()
+    
 class OutputBox(widget.WidgetWrap):
     def __init__(self, remember=1000): #, lexer=None, formatter=None):
         self.remember = 1000
@@ -231,11 +283,11 @@ class BasicInterpLoop(urwid.MainLoop):
         if interp == None:
             interp = InterpreterWidget()
         
-        urwid.MainLoop.__init__(self, interp, palette, screen, handle_mouse, 
+        self.interp = interp
+        
+        urwid.MainLoop.__init__(self, palette, screen, handle_mouse, 
             input_filter, unhandled_input, event_loop)
-    
-    def 
-    
+        
 
 def simplemain():
     
@@ -257,6 +309,11 @@ def simplemain():
         mainloop.run()
     except KeyboardInterrupt:
         pass
+
+class Pager(object):
+    def __init__(self, formatter=None):
+        if formatter is None:
+            formatter = 
 
 if __name__ == "__main__":
     simplemain()

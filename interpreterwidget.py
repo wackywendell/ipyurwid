@@ -1,3 +1,4 @@
+# coding: utf-8
 """Provides an urwid widget that can act like a terminal."""
 
 import urwid
@@ -37,15 +38,14 @@ class interpreterwidget(urwid.Pile):
         self.formatter = UrwidFormatter()
         self.lexer = pygments.lexers.get_lexer_by_name('python')
         
-        print self.lexer
-        self.inputbox = PythonEdit(multiline=True,lexer = self.lexer, formatter = self.formatter)
-        self.inputcols = urwid.Columns((  # Flow widget (from inputbox)
-            ('fixed', len(caption), self.captionwidget),
-            self.inputbox))
-        self.inputwidget = urwid.Filler(self.inputcols, valign='top')
+        self.inputbox = PromptPyEdit(multiline=True,lexer = self.lexer, formatter = self.formatter)
+        self.inputwidget = urwid.Filler(self.inputbox, valign='top')
         
         # the completion box
-        self.completionbox = urwid.Text('')
+        self.completionbox = TextGrid()
+        
+        # the 'upper' box, which can be switched to completions, help, etc.
+        self.upperbox = Switcher(self.completionbox)
         
         # now the output widgets
         self.outputbox = urwid.Text('')    # Flow widget
@@ -54,23 +54,14 @@ class interpreterwidget(urwid.Pile):
         
         # now initialize as a pile
         urwid.Pile.__init__(self, [
-            ('flow', self.completionbox),
+            ('flow', self.upperbox),
             self.outputwidget,
             ('fixed', inputlines, self.inputwidget)]
         )
     
     def setinputcaption(self, caption):
-        # currently only accepts regular text.
-        self.captionwidget.set_text(caption)
+        self.inputbox.set_prompt(caption)
         
-        #t = urwid.Text(caption)          # just to get it in a nice form
-        
-        #allow 'caption' to be urwid markup
-        captiontxt, attr = self.captionwidget.get_text()
-        self.inputcols.column_types[0] = ('fixed', len(captiontxt))
-        # hack to make the column delete its cache
-        #self.inputcols.widget_list._modified()
-    
     def setstyle(self, s):
         if isinstance(s, basestring):
             s = pygments.styles.get_style_by_name(s)
@@ -89,7 +80,7 @@ class interpreterwidget(urwid.Pile):
 class fakeinterpreter(object):
     def __init__(self, widget):
         self.widget = widget
-        self.widget.completionbox.set_text('COMPLETION BOX\nWIH COMPLETIONS')
+        self.widget.completionbox.set_text(['COMPLETION BOX','WIH COMPLETIONS','MORE COMPLETIONS'])
         
         allstyles = list(pygments.styles.get_all_styles())
         style = 'default'
@@ -98,17 +89,27 @@ class fakeinterpreter(object):
                 style = s
                 break
         
-        self.widget.completionbox.set_text(s)
+#        self.widget.completionbox.set_text(s)
         widget.setstyle(s)
         
         self.n = 10
         
     def handleinput(self, inpt):
-        txt = self.widget.inputbox.edit_text
-        if self.n <= 0 or txt.strip() == 'q':
+        txt = self.widget.inputbox.text
+        if self.n <= 0 or txt.strip() == 'q' or txt.strip() == '':
             raise urwid.ExitMainLoop()
+        
         self.n -= 1
-        self.widget.inputbox.set_edit_text('')
+        self.widget.inputbox.text =u''
+        
+        if txt.strip() == u's':
+            if self.widget.upperbox.widget == self.widget.completionbox:
+                self.widget.upperbox.widget = urwid.Text('Another widget!')
+            else:
+                self.widget.upperbox.widget = self.widget.completionbox
+                #self.widget.upperbox.widget = urwid.Text('Another widget!')
+            return True
+        
         tkns = self.widget.lexer.get_tokens(txt)
         markup = list(self.widget.formatter.formatgenerator(tkns))
         
