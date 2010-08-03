@@ -4,6 +4,7 @@
 import urwid
 import pygments.lexers
 import pygments.styles
+import pydoc
 
 from pywidget import *
 from urwidpygments import UrwidFormatter
@@ -21,7 +22,7 @@ def recompose(text, attrlst):
     return markup
 
 
-class interpreterwidget(urwid.Pile):
+class InterpreterWidget(urwid.Pile):
     """A widget that looks like an interpreter.
 
     Note that this is simply a widget, and has no extra functionality;
@@ -45,11 +46,12 @@ class interpreterwidget(urwid.Pile):
         self.completionbox = TextGrid()
         
         # the 'upper' box, which can be switched to completions, help, etc.
-        self.upperbox = Switcher(self.completionbox)
+        self.upperbox = UpperBox(self.completionbox)
         
         # now the output widgets
-        self.outputbox = urwid.Text('')    # Flow widget
-        self.outputwidget = urwid.Filler(self.outputbox, valign='top')
+        self.outputbox = OutputBox()    # Box widget
+        self.outputwidget = self.outputbox
+        #self.outputwidget = urwid.Filler(self.outputbox, valign='top')
                     # Box widget
         
         # now initialize as a pile
@@ -58,16 +60,20 @@ class interpreterwidget(urwid.Pile):
             self.outputwidget,
             ('fixed', inputlines, self.inputwidget)]
         )
+        self.set_focus(self.inputwidget)
     
-    def setinputcaption(self, caption):
+    def set_input_caption(self, caption):
         self.inputbox.set_prompt(caption)
         
-    def setstyle(self, s):
+    def set_style(self, s):
         if isinstance(s, basestring):
             s = pygments.styles.get_style_by_name(s)
         self.formatter.style = s
     
-    def addtooutput(self, markup):
+    def add_to_output(self, markup):
+        self.outputbox.add_stdout(markup)
+        return
+        
         t = urwid.Text(markup)          # just to get it in a nice form
         newtxt, newattr = t.get_text()  # gets the attrs in a list form
         oldtxt, oldattr = self.outputbox.get_text()
@@ -76,62 +82,45 @@ class interpreterwidget(urwid.Pile):
         markup = recompose(newtxt, newattr)
         return self.outputbox.set_text(markup)
         #return self.outputbox.set_text(('2', oldtxt + newtxt))
-
-class fakeinterpreter(object):
-    def __init__(self, widget):
-        self.widget = widget
-        self.widget.completionbox.set_text(['COMPLETION BOX','WIH COMPLETIONS','MORE COMPLETIONS'])
+    
+    def _get_widget_size(self, widget, selfsize):
+        item_rows = None
+        if len(selfsize)==2: # Box widget
+            item_rows = self.get_item_rows( selfsize, focus=True )
+        i = self.widget_list.index(widget)
+        return self.get_item_size(selfsize,i,True,item_rows)
+    
+    def _passkey(self, widget, size, key):
+        """Pass the key along to an inner widget."""
+        tsize = self._get_widget_size(widget, size)
+        key = widget.keypress( tsize, key )
+        return key
+    
+    def keypress(self, size, key):
+        """We do not want the normal urwid.Pile keypress stuff to happen..."""
+        # let the focus item use the key, if it can...
+        if (self.focus_item.selectable() and 
+                self.focus_item is not self.outputwidget):
+            key = self._passkey(self.focus_item, size, key)
         
-        allstyles = list(pygments.styles.get_all_styles())
-        style = 'default'
-        for s in ('monokai', 'native'):
-            if s in allstyles:
-                style = s
-                break
+        # try it on the outputbox
+    
+        origkey = key
+        if key in ('up','page up', 'home'):
+            self.outputbox.jumptobottom = False
+            key = None
+        key = self._passkey(self.outputwidget, size, origkey)
+        tsize = self._get_widget_size(self.outputwidget, size)
+        if (origkey in ('down', 'page down', 'end')
+                and self.outputbox.atbottom(tsize)):
+            self.outputbox.jumptobottom = True
+            key = None
         
-#        self.widget.completionbox.set_text(s)
-        widget.setstyle(s)
-        
-        self.n = 10
-        
-    def handleinput(self, inpt):
-        txt = self.widget.inputbox.text
-        if self.n <= 0 or txt.strip() == 'q' or txt.strip() == '':
-            raise urwid.ExitMainLoop()
-        
-        self.n -= 1
-        self.widget.inputbox.text =u''
-        
-        if txt.strip() == u's':
-            if self.widget.upperbox.widget == self.widget.completionbox:
-                self.widget.upperbox.widget = urwid.Text('Another widget!')
+        if key == 'ctrl k':
+            # switch focus widget
+            if self.focus_item is self.outputwidget:
+                self.set_focus(self.inputwidget)
             else:
-                self.widget.upperbox.widget = self.widget.completionbox
-                #self.widget.upperbox.widget = urwid.Text('Another widget!')
-            return True
-        
-        tkns = self.widget.lexer.get_tokens(txt)
-        markup = list(self.widget.formatter.formatgenerator(tkns))
-        
-        #self.widget.addtooutput(('default','moretext:' + repr(inpt) + '\n'))
-        self.widget.addtooutput(markup) 
-        return True
-
-
-if __name__ == "__main__":
-    mainwin = interpreterwidget()
-    interp = fakeinterpreter(mainwin)
-    
-    promptattr = urwid.AttrSpec('yellow, bold', 'default')
-    
-    mainwin.setinputcaption((promptattr, 'PROMPT> '))
-    
-    screen = urwid.raw_display.Screen()
-    #screen.set_terminal_properties(colors=256)   # at least, try...
-    #screen.reset_default_terminal_palette()      # get the normal colors
-    loop = urwid.MainLoop(mainwin, screen=screen, 
-                            unhandled_input=interp.handleinput)
-    try:
-        loop.run()
-    except KeyboardInterrupt:
-        pass
+                self.set_focus(self.outputwidget)
+            return
+        return key

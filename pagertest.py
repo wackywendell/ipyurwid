@@ -1,3 +1,9 @@
+"""
+A simple 'test' program that runs urwid and outputs key presses. When 'p' is 
+pressed, urwid is stopped, a pager is started, and when it exits, urwid
+is resumed where it left off.
+"""
+
 import sys, subprocess
 from subprocess import PIPE
 
@@ -23,7 +29,6 @@ def run_pager(txt):
     proc = subprocess.Popen(['less', '-Rc'], stdin=PIPE)
     #proc = subprocess.Popen(['more', '-c'], stdin=PIPE)
     proc.communicate(txt)
-    proc.wait()
     
 class MainLoop(urwid.MainLoop):
     def unhandled_input(self, input):

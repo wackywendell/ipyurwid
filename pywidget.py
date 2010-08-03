@@ -1,5 +1,7 @@
 # encoding: UTF-8
-import pygments, pygments.lexers
+import pygments, pygments.lexers, pygments.formatters
+
+import subprocess
 
 import urwid
 import urwid.widget as widget
@@ -199,7 +201,7 @@ class Switcher(widget.WidgetWrap):
         self._w = urwid.Text('')
         self.blank = True
         self._invalidate()
-    
+
 class UpperBox(widget.WidgetWrap):
     def __init__(self, firstwidget=None):
         self._divider = urwid.Divider(u'─')
@@ -219,101 +221,53 @@ class UpperBox(widget.WidgetWrap):
     def widget(self):
         del self._switcher.widget
         self._invalidate()
-    
+
 class OutputBox(widget.WidgetWrap):
-    def __init__(self, remember=1000): #, lexer=None, formatter=None):
-        self.remember = 1000
+    def __init__(self, remember=1000, jumptobottom=True): #, lexer=None, formatter=None):
+        self.remember = remember
         #self.lexer=lexer
         #self.formatter=formatter
         self.list = urwid.SimpleListWalker([])
+        self.jumptobottom = jumptobottom
         mywidget = urwid.ListBox(self.list)
         widget.WidgetWrap.__init__(self, mywidget)
     
+    @property
+    def jumptobottom(self):
+        return self._jumptobottom
+    
+    @jumptobottom.setter
+    def jumptobottom(self, val):
+        self._jumptobottom = bool(val)
+        if len(self.list) > 0:
+            self.list.set_focus(len(self.list))
+        
     def add_stdout(self, markup):
         t=urwid.Text(markup)
         self.list.append(t)
         self.list[:] = self.list[-self.remember:]
+        if self.jumptobottom:
+            self.list.set_focus(len(self.list))
     
-class InterpreterWidget(widget.WidgetWrap):
-    def __init__(self, inputlines = 4):
-        self.lexer = pygments.lexers.get_lexer_by_name('python')
-        self.formatter = UrwidFormatter()
-        
-        self.completionbox = TextGrid()
-        
-        self.outputbox = OutputBox()    # Flow widget
-        
-        self.inputbox = PromptPyEdit(lexer=self.lexer, formatter=self.formatter)
-        self.completiondivider = urwid.Divider(u"─")
-        self.inputdivider = urwid.Divider(u"─")
-        
-        pile = urwid.Pile([
-            ('flow', self.completionbox),
-            ('flow', self.completiondivider),
-            self.outputbox,
-            ('flow', self.inputdivider),
-            ('flow', self.inputbox)
-            #('fixed', inputlines, self.inputbox)
-        ])
-        
-        pile.set_focus(self.inputbox)
-        
-        widget.WidgetWrap.__init__(self, pile)
+    def atbottom(self, size):
+        return 'bottom' in self._w.ends_visible(size)
     
-    def keypress(self, size, key):
-        if key == 'up' or key == 'down':
-            return key
+class PagerScreen(urwid.raw_display.Screen):
+    """Derives from urwid.raw_display.Screen, and adds a function to run text
+    through a pager."""
+    def page(self, txt):
+        """Turn off urwid, run a pager, and then resume.
+        Text is handed directly to the pager, so any markup needs to be turned
+        into basic terminal escapes."""
         
-        # the usual processing
-        val = self._w.keypress(size, key)
-        
-        if val is None:
-            return
-        elif val == 'enter':
-            txt, attr = self.inputbox.markup
-            txt = txt.rstrip()
-            self.inputbox.text = ''
-            self.outputbox.add_stdout(recompose(txt, attr))
-            return
-        
-        return key
-
-class BasicInterpLoop(urwid.MainLoop):
-    def __init__(self, interp=None, palette=[], screen=None, handle_mouse=True, input_filter=None, unhandled_input=None, event_loop=None):
-        if interp == None:
-            interp = InterpreterWidget()
-        
-        self.interp = interp
-        
-        urwid.MainLoop.__init__(self, palette, screen, handle_mouse, 
-            input_filter, unhandled_input, event_loop)
-        
-
-def simplemain():
-    
-    interp = InterpreterWidget()
-    screen = urwid.raw_display.Screen()
-    
-    def mainkeypress(key):
-        interp.completionbox.set_text([key])
-        #screen.
-    #filler = urwid.Filler(PythonEdit())
-    #filler = urwid.Filler(interp.inputbox.promptbox)
-    #filler = urwid.Filler(interp.inputbox.editbox)
-    #filler = urwid.Filler(interp.inputbox)
-    #filler = urwid.Filler(interp.completionbox)
-    
-    interp.completionbox.set_text(['completions','available','here'])
-    mainloop = urwid.MainLoop(interp, screen=screen, unhandled_input=mainkeypress)
-    try:
-        mainloop.run()
-    except KeyboardInterrupt:
-        pass
-
-class Pager(object):
-    def __init__(self, formatter=None):
-        if formatter is None:
-            formatter = 
-
-if __name__ == "__main__":
-    simplemain()
+        started = self._started
+        if started:
+            self.stop()
+        proc = subprocess.Popen(['less', '-Rc'], stdin=subprocess.PIPE)
+        #proc = subprocess.Popen(['more', '-c'], stdin=PIPE)
+        try:
+            proc.communicate(txt)
+        except IOError:
+            pass
+        proc.wait()
+        self.start()
