@@ -1,4 +1,8 @@
-from interpreterwidget import *
+import pydoc
+
+import urwid, pygments
+
+from interpreterwidget import InterpreterWidget, PagerScreen
 
 class FakeInterpreter(object):
     def __init__(self, widget, screen):
@@ -81,10 +85,10 @@ CTRL-W : Switch widget at the top'''
         
         self.widget.inputbox.text =u''
         
-        tkns = self.widget.lexer.get_tokens(txt)
+        tkns = self.widget.lexer.get_tokens(txt.strip())
         markup = list(self.widget.formatter.formatgenerator(tkns))
         
-        #self.widget.addtooutput(('default','moretext:' + repr(inpt) + '\n'))
+        #self.widget.add_to_output(('default','moretext:' + repr(markup) + '\n'))
         self.widget.add_to_output(markup) 
         return True
 

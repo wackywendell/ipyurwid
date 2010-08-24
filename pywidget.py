@@ -244,6 +244,10 @@ class OutputBox(widget.WidgetWrap):
         
     def add_stdout(self, markup):
         t=urwid.Text(markup)
+        txt, attrs = t.get_text()
+        if len(txt) > 0 and txt[-1] == u'\n':
+            txt = txt[:-1]
+            t.set_text(recompose(txt, attrs))
         self.list.append(t)
         self.list[:] = self.list[-self.remember:]
         if self.jumptobottom:

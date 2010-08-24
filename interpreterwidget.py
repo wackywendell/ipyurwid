@@ -10,18 +10,6 @@ from pywidget import *
 from urwidpygments import UrwidFormatter
 
 
-def recompose(text, attrlst):
-    """For some reason, urwid.Text.get_text returns an object not
-    suitable for use by urwid.Text.set_text. 'recompose' takes the
-    two objects returned by get_text, and recomposes them for use by
-    set_text. It is thus the inverse of urwid.decompose()."""
-    markup = []
-    for (attr, length) in attrlst:
-        textpiece, text = text[:length], text[length:]
-        markup.append((attr, textpiece))
-    return markup
-
-
 class InterpreterWidget(urwid.Pile):
     """A widget that looks like an interpreter.
 
@@ -74,15 +62,6 @@ class InterpreterWidget(urwid.Pile):
         self.outputbox.add_stdout(markup)
         return
         
-        t = urwid.Text(markup)          # just to get it in a nice form
-        newtxt, newattr = t.get_text()  # gets the attrs in a list form
-        oldtxt, oldattr = self.outputbox.get_text()
-        newtxt = oldtxt + newtxt
-        newattr = oldattr + newattr
-        markup = recompose(newtxt, newattr)
-        return self.outputbox.set_text(markup)
-        #return self.outputbox.set_text(('2', oldtxt + newtxt))
-    
     def _get_widget_size(self, widget, selfsize):
         item_rows = None
         if len(selfsize)==2: # Box widget
