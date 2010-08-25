@@ -52,13 +52,14 @@ from IPython.core.error import TryNext
 from IPython.core.error import UsageError
 from IPython.core.fakemodule import FakeModule
 from IPython.core.macro import Macro
-from IPython.core.page import page
+from IPython.core import page
 from IPython.core.prefilter import ESC_MAGIC
 from IPython.lib.pylabtools import mpl_runner
 from IPython.lib.inputhook import enable_gui
 from IPython.external.Itpl import itpl, printpl
 from IPython.testing import decorators as testdec
-from IPython.utils.io import Term, file_read, nlprint
+from IPython.utils.io import file_read, nlprint
+import IPython.utils.io
 from IPython.utils.path import get_py_filename
 from IPython.utils.process import arg_split, abbrev_cwd
 from IPython.utils.terminal import set_term_title
@@ -513,7 +514,7 @@ Currently the magic system has the following functions:\n"""
                                      ('  '+mesc).join(self.lsmagic()),
                                      Magic.auto_status[self.shell.automagic] ) )
 
-        page(outmsg,screen_lines=self.shell.usable_screen_length)
+        page.page(outmsg,screen_lines=self.shell.usable_screen_length)
   
 
     def magic_autoindent(self, parameter_s = ''):
@@ -655,7 +656,7 @@ Currently the magic system has the following functions:\n"""
         info = self._ofind(oname)
         if info['found']:
             txt = (raw and str or pformat)( info['obj'] )
-            page(txt)
+            page.page(txt)
         else:
             print 'Object `%s` not found' % oname
 
@@ -726,7 +727,7 @@ Currently the magic system has the following functions:\n"""
             except IOError,msg:
                 print msg
                 return
-            page(self.shell.inspector.format(file(filename).read()))
+            page.page(self.shell.inspector.format(file(filename).read()))
 
     def _inspect(self,meth,oname,namespaces=None,**kw):
         """Generic interface to the inspector system.
@@ -1519,7 +1520,7 @@ Currently the magic system has the following functions:\n"""
         output = stdout_trap.getvalue()
         output = output.rstrip()
 
-        page(output,screen_lines=self.shell.usable_screen_length)
+        page.page(output,screen_lines=self.shell.usable_screen_length)
         print sys_exit,
 
         dump_file = opts.D[0]
@@ -1699,7 +1700,7 @@ Currently the magic system has the following functions:\n"""
         # set the __file__ global in the script's namespace
         prog_ns['__file__'] = filename
 
-        # pickle fix.  See iplib for an explanation.  But we need to make sure
+        # pickle fix.  See interactiveshell for an explanation.  But we need to make sure
         # that, if we overwrite __main__, we replace it at the end
         main_mod_name = prog_ns['__name__']
 
@@ -2377,7 +2378,7 @@ Currently the magic system has the following functions:\n"""
         # use last_call to remember the state of the previous call, but don't
         # let it be clobbered by successive '-p' calls.
         try:
-            last_call[0] = self.shell.outputcache.prompt_count
+            last_call[0] = self.shell.displayhook.prompt_count
             if not opts_p:
                 last_call[1] = parameter_s
         except:
@@ -2524,13 +2525,6 @@ Currently the magic system has the following functions:\n"""
         except:
             xmode_switch_err('user')
 
-        # threaded shells use a special handler in sys.excepthook
-        if shell.isthreaded:
-            try:
-                shell.sys_excepthook.set_mode(mode=new_mode)
-            except:
-                xmode_switch_err('threaded')
-            
     def magic_colors(self,parameter_s = ''):
         """Switch color scheme for prompts, info system and exception handlers.
 
@@ -2572,12 +2566,12 @@ Defaulting color scheme to 'NoColor'"""
             
         # Set prompt colors
         try:
-            shell.outputcache.set_colors(new_scheme)
+            shell.displayhook.set_colors(new_scheme)
         except:
             color_switch_err('prompt')
         else:
             shell.colors = \
-                       shell.outputcache.color_table.active_scheme_name
+                       shell.displayhook.color_table.active_scheme_name
         # Set exception colors
         try:
             shell.InteractiveTB.set_colors(scheme = new_scheme)
@@ -2585,13 +2579,6 @@ Defaulting color scheme to 'NoColor'"""
         except:
             color_switch_err('exception')
 
-        # threaded shells use a verbose traceback in sys.excepthook
-        if shell.isthreaded:
-            try:
-                shell.sys_excepthook.set_colors(scheme=new_scheme)
-            except:
-                color_switch_err('system exception handler')
-        
         # Set info (for 'object?') colors
         if shell.color_info:
             try:
@@ -2902,7 +2889,7 @@ Defaulting color scheme to 'NoColor'"""
         if ps:
             try:                
                 os.chdir(os.path.expanduser(ps))
-                if self.shell.term_title:
+                if hasattr(self.shell, 'term_title') and self.shell.term_title:
                     set_term_title('IPython: ' + abbrev_cwd())
             except OSError:
                 print sys.exc_info()[1]
@@ -2915,7 +2902,7 @@ Defaulting color scheme to 'NoColor'"""
                 
         else:
             os.chdir(self.shell.home_dir)
-            if self.shell.term_title:
+            if hasattr(self.shell, 'term_title') and self.shell.term_title:
                 set_term_title('IPython: ' + '~')
             cwd = os.getcwd()
             dhist = self.shell.user_ns['_dh']
@@ -3107,7 +3094,7 @@ Defaulting color scheme to 'NoColor'"""
         # If all looks ok, proceed
         out,err = self.shell.getoutputerror(cmd)
         if err:
-            print >> Term.cerr,err
+            print >> IPython.utils.io.Term.cerr, err
         if opts.has_key('l'):
             out = SList(out.split('\n'))
         else:
@@ -3157,52 +3144,9 @@ Defaulting color scheme to 'NoColor'"""
         if parameter_s:
             out,err = self.shell.getoutputerror(parameter_s)
             if err:
-                print >> Term.cerr,err
+                print >> IPython.utils.io.Term.cerr, err
             return SList(out.split('\n'))
 
-    def magic_bg(self, parameter_s=''):
-        """Run a job in the background, in a separate thread.
-
-        For example,
-
-          %bg myfunc(x,y,z=1)
-
-        will execute 'myfunc(x,y,z=1)' in a background thread.  As soon as the
-        execution starts, a message will be printed indicating the job
-        number.  If your job number is 5, you can use
-
-          myvar = jobs.result(5)  or  myvar = jobs[5].result
-
-        to assign this result to variable 'myvar'.
-
-        IPython has a job manager, accessible via the 'jobs' object.  You can
-        type jobs? to get more information about it, and use jobs.<TAB> to see
-        its attributes.  All attributes not starting with an underscore are
-        meant for public use.
-
-        In particular, look at the jobs.new() method, which is used to create
-        new jobs.  This magic %bg function is just a convenience wrapper
-        around jobs.new(), for expression-based jobs.  If you want to create a
-        new job with an explicit function object and arguments, you must call
-        jobs.new() directly.
-
-        The jobs.new docstring also describes in detail several important
-        caveats associated with a thread-based model for background job
-        execution.  Type jobs.new? for details.
-
-        You can check the status of all jobs with jobs.status().
-
-        The jobs variable is set by IPython into the Python builtin namespace.
-        If you ever declare a variable named 'jobs', you will shadow this
-        name.  You can either delete your global jobs variable to regain
-        access to the job manager, or make a new name and assign it manually
-        to the manager (stored in IPython's namespace).  For example, to
-        assign the job manager to the Jobs name, use:
-
-          Jobs = __builtins__.jobs"""
-        
-        self.shell.jobs.new(parameter_s,self.shell.user_ns)
-        
     def magic_r(self, parameter_s=''):
         """Repeat previous input.
 
@@ -3312,7 +3256,7 @@ Defaulting color scheme to 'NoColor'"""
             print "Error: no such file or variable"
             return
             
-        page(self.shell.pycolorize(cont),
+        page.page(self.shell.pycolorize(cont),
              screen_lines=self.shell.usable_screen_length)
 
     def _rerun_pasted(self):
@@ -3327,10 +3271,10 @@ Defaulting color scheme to 'NoColor'"""
     def _get_pasted_lines(self, sentinel):
         """ Yield pasted lines until the user enters the given sentinel value.
         """
-        from IPython.core import iplib
+        from IPython.core import interactiveshell
         print "Pasting code; enter '%s' alone on the line to stop." % sentinel
         while True:
-            l = iplib.raw_input_original(':')
+            l = interactiveshell.raw_input_original(':')
             if l == sentinel:
                 return
             else:
@@ -3469,7 +3413,7 @@ Defaulting color scheme to 'NoColor'"""
         import IPython.core.usage
         qr = IPython.core.usage.quick_reference + self.magic_magic('-brief')
         
-        page(qr)
+        page.page(qr)
 
     def magic_doctest_mode(self,parameter_s=''):
         """Toggle doctest mode on and off.
@@ -3495,7 +3439,7 @@ Defaulting color scheme to 'NoColor'"""
 
         # Shorthands
         shell = self.shell
-        oc = shell.outputcache
+        oc = shell.displayhook
         meta = shell.meta
         # dstore is a data store kept in the instance metadata bag to track any
         # changes we make, so we can undo them later.

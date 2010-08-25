@@ -44,23 +44,18 @@ somewhere in your configuration files or ipython command line.
 import os, bisect
 import sys
 
-from pprint import PrettyPrinter
-
-from IPython.utils.io import Term
-from IPython.utils.process import shell
-
 from IPython.core.error import TryNext
+import IPython.utils.io
+from IPython.utils.process import shell
 
 # List here all the default hooks.  For now it's just the editor functions
 # but over time we'll move here all the public API for user-accessible things.
 
-__all__ = ['editor', 'fix_error_editor', 'synchronize_with_editor', 'result_display',
+__all__ = ['editor', 'fix_error_editor', 'synchronize_with_editor',
            'input_prefilter', 'shutdown_hook', 'late_startup_hook',
-           'generate_prompt', 'generate_output_prompt','shell_hook',
+           'generate_prompt','shell_hook',
            'show_in_pager','pre_prompt_hook', 'pre_runcode_hook',
            'clipboard_get']
-
-pformat = PrettyPrinter().pformat
 
 def editor(self,filename, linenum=None):
     """Open the default editor at the given filename and linenumber.
@@ -175,13 +170,13 @@ def result_display(self,arg):
             # So that multi-line strings line up with the left column of
             # the screen, instead of having the output prompt mess up
             # their first line.                
-            Term.cout.write('\n')
-        print >>Term.cout, out
+            IPython.utils.io.Term.cout.write('\n')
+        print >>IPython.utils.io.Term.cout, out
     else:
         # By default, the interactive prompt uses repr() to display results,
         # so we should honor this.  Users who'd rather use a different
         # mechanism can easily override this hook.
-        print >>Term.cout, repr(arg)
+        print >>IPython.utils.io.Term.cout, repr(arg)
     # the default display hook doesn't manipulate the value to put in history
     return None 
 
@@ -221,12 +216,8 @@ def late_startup_hook(self):
 def generate_prompt(self, is_continuation):
     """ calculate and return a string with the prompt to display """
     if is_continuation:
-        return str(self.outputcache.prompt2)
-    return str(self.outputcache.prompt1)
-
-
-def generate_output_prompt(self):
-    return str(self.outputcache.prompt_out)
+        return str(self.displayhook.prompt2)
+    return str(self.displayhook.prompt1)
 
 
 def shell_hook(self,cmd):

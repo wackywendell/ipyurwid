@@ -33,10 +33,10 @@ from IPython.core.alias import AliasManager
 from IPython.core.autocall import IPyAutocall
 from IPython.config.configurable import Configurable
 from IPython.core.splitinput import split_user_input
-from IPython.core.page import page
+from IPython.core import page
 
 from IPython.utils.traitlets import List, Int, Any, Str, CBool, Bool, Instance
-from IPython.utils.io import Term
+import IPython.utils.io
 from IPython.utils.text import make_quoted_expr
 from IPython.utils.autoattr import auto_attr
 
@@ -210,7 +210,7 @@ class PrefilterManager(Configurable):
     """
 
     multi_line_specials = CBool(True, config=True)
-    shell = Instance('IPython.core.iplib.InteractiveShellABC')
+    shell = Instance('IPython.core.interactiveshell.InteractiveShellABC')
 
     def __init__(self, shell=None, config=None):
         super(PrefilterManager, self).__init__(shell=shell, config=config)
@@ -405,7 +405,7 @@ class PrefilterManager(Configurable):
         normal_handler = self.get_handler_by_name('normal')
         if not stripped:
             if not continue_prompt:
-                self.shell.outputcache.prompt_count -= 1
+                self.shell.displayhook.prompt_count -= 1
 
             return normal_handler.handle(line_info)
 
@@ -453,7 +453,7 @@ class PrefilterTransformer(Configurable):
     priority = Int(100, config=True)
     # Transformers don't currently use shell or prefilter_manager, but as we
     # move away from checkers and handlers, they will need them.
-    shell = Instance('IPython.core.iplib.InteractiveShellABC')
+    shell = Instance('IPython.core.interactiveshell.InteractiveShellABC')
     prefilter_manager = Instance('IPython.core.prefilter.PrefilterManager')
     enabled = Bool(True, config=True)
 
@@ -561,7 +561,7 @@ class PrefilterChecker(Configurable):
     """Inspect an input line and return a handler for that line."""
 
     priority = Int(100, config=True)
-    shell = Instance('IPython.core.iplib.InteractiveShellABC')
+    shell = Instance('IPython.core.interactiveshell.InteractiveShellABC')
     prefilter_manager = Instance('IPython.core.prefilter.PrefilterManager')
     enabled = Bool(True, config=True)
 
@@ -754,7 +754,7 @@ class PrefilterHandler(Configurable):
 
     handler_name = Str('normal')
     esc_strings = List([])
-    shell = Instance('IPython.core.iplib.InteractiveShellABC')
+    shell = Instance('IPython.core.interactiveshell.InteractiveShellABC')
     prefilter_manager = Instance('IPython.core.prefilter.PrefilterManager')
 
     def __init__(self, shell=None, prefilter_manager=None, config=None):
@@ -916,13 +916,13 @@ class AutoHandler(PrefilterHandler):
                     newcmd = '%s(%s)' % (ifun.rstrip(), the_rest)
 
         if auto_rewrite:
-            rw = self.shell.outputcache.prompt1.auto_rewrite() + newcmd
+            rw = self.shell.displayhook.prompt1.auto_rewrite() + newcmd
             
             try:
                 # plain ascii works better w/ pyreadline, on some machines, so
                 # we use it and only print uncolored rewrite if we have unicode
                 rw = str(rw)
-                print >>Term.cout, rw
+                print >>IPython.utils.io.Term.cout, rw
             except UnicodeEncodeError:
                 print "-------------->" + newcmd
             
@@ -960,7 +960,7 @@ class HelpHandler(PrefilterHandler):
                 #print 'line:<%r>' % line  # dbg
                 self.shell.magic_pinfo(line)
             else:
-                page(self.shell.usage, screen_lines=self.shell.usable_screen_length)
+                page.page(self.shell.usage, screen_lines=self.shell.usable_screen_length)
             return '' # Empty string is needed here!
         except:
             raise

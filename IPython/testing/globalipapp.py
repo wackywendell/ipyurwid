@@ -114,8 +114,7 @@ def start_ipython():
         return
     start_ipython.already_called = True
 
-    # Ok,  first time we're called, go ahead
-    from IPython.core import iplib
+    from IPython.frontend.terminal import interactiveshell
     
     def xsys(cmd):
         """Execute a command and print its output.
@@ -136,7 +135,7 @@ def start_ipython():
     config = tools.default_config()
 
     # Create and initialize our test-friendly IPython instance.
-    shell = iplib.InteractiveShell.instance(
+    shell = interactiveshell.TerminalInteractiveShell.instance(
         config=config, 
         user_ns=ipnsdict(), user_global_ns={}
     )
@@ -147,9 +146,6 @@ def start_ipython():
     # permanently since we'll be mocking interactive sessions.
     shell.builtin_trap.set()
 
-    # Set error printing to stdout so nose can doctest exceptions
-    shell.InteractiveTB.out_stream = 'stdout'
-    
     # Modify the IPython system call with one that uses getoutput, so that we
     # can capture subcommands and print them to Python's stdout, otherwise the
     # doctest machinery would miss them.
