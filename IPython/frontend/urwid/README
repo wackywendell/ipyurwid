@@ -1,0 +1,15 @@
+A prototype for an ipython frontend based on the Urwid library.
+
+Requirements:
+pygments (easy_install pygments)
+urwid (git clone git://github.com/wardi/urwid.git) (easy_install version may be outdated)
+
+This prototype demonstrates the use of widgets to make it work... it has an
+output box, a colored input box, a completion box, and a help box.
+
+Currently, functionality is limited. Run 'python fakeinterp.py'
+to get it to start; commands are at the top.
+There is no interpretation of code - the 'fakeinterpreter' simply spits the code
+back out as output.
+
+
