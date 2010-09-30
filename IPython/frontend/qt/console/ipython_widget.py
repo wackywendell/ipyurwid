@@ -6,64 +6,113 @@
           Linux (use the xdg system).
 """
 
+#-----------------------------------------------------------------------------
+# Imports
+#-----------------------------------------------------------------------------
+
 # Standard library imports
+from collections import namedtuple
+import re
 from subprocess import Popen
+from textwrap import dedent
 
 # System library imports
 from PyQt4 import QtCore, QtGui
 
 # Local imports
-from IPython.core.inputsplitter import IPythonInputSplitter
-from IPython.core.usage import default_banner
+from IPython.core.inputsplitter import IPythonInputSplitter, \
+    transform_ipy_prompt
+from IPython.core.usage import default_gui_banner
+from IPython.utils.traitlets import Bool, Str
 from frontend_widget import FrontendWidget
 
+#-----------------------------------------------------------------------------
+# Constants
+#-----------------------------------------------------------------------------
 
-class IPythonPromptBlock(object):
-    """ An internal storage object for IPythonWidget.
-    """
-    def __init__(self, block, length, number):
-        self.block = block
-        self.length = length
-        self.number = number
+# The default light style sheet: black text on a white background.
+default_light_style_sheet = '''
+    .error { color: red; }
+    .in-prompt { color: navy; }
+    .in-prompt-number { font-weight: bold; }
+    .out-prompt { color: darkred; }
+    .out-prompt-number { font-weight: bold; }
+'''
+default_light_syntax_style = 'default'
 
+# The default dark style sheet: white text on a black background.
+default_dark_style_sheet = '''
+    QPlainTextEdit, QTextEdit { background-color: black; color: white }
+    QFrame { border: 1px solid grey; }
+    .error { color: red; }
+    .in-prompt { color: lime; }
+    .in-prompt-number { color: lime; font-weight: bold; }
+    .out-prompt { color: red; }
+    .out-prompt-number { color: red; font-weight: bold; }
+'''
+default_dark_syntax_style = 'monokai'
+
+# Default strings to build and display input and output prompts (and separators
+# in between)
+default_in_prompt = 'In [<span class="in-prompt-number">%i</span>]: '
+default_out_prompt = 'Out[<span class="out-prompt-number">%i</span>]: '
+default_input_sep = '\n'
+default_output_sep = ''
+default_output_sep2 = ''
+
+# Base path for most payload sources.
+zmq_shell_source = 'IPython.zmq.zmqshell.ZMQInteractiveShell'
+
+#-----------------------------------------------------------------------------
+# IPythonWidget class
+#-----------------------------------------------------------------------------
 
 class IPythonWidget(FrontendWidget):
     """ A FrontendWidget for an IPython kernel.
     """
 
-    # Signal emitted when an editor is needed for a file and the editor has been
-    # specified as 'custom'. See 'set_editor' for more information.
+    # If set, the 'custom_edit_requested(str, int)' signal will be emitted when
+    # an editor is needed for a file. This overrides 'editor' and 'editor_line'
+    # settings.
+    custom_edit = Bool(False)
     custom_edit_requested = QtCore.pyqtSignal(object, object)
 
-    # The default stylesheet: black text on a white background.
-    default_stylesheet = """
-        .error { color: red; }
-        .in-prompt { color: navy; }
-        .in-prompt-number { font-weight: bold; }
-        .out-prompt { color: darkred; }
-        .out-prompt-number { font-weight: bold; }
-    """
+    # A command for invoking a system text editor. If the string contains a
+    # {filename} format specifier, it will be used. Otherwise, the filename will
+    # be appended to the end the command.
+    editor = Str('default', config=True)
 
-    # A dark stylesheet: white text on a black background.
-    dark_stylesheet = """
-        QPlainTextEdit, QTextEdit { background-color: black; color: white }
-        QFrame { border: 1px solid grey; }
-        .error { color: red; }
-        .in-prompt { color: lime; }
-        .in-prompt-number { color: lime; font-weight: bold; }
-        .out-prompt { color: red; }
-        .out-prompt-number { color: red; font-weight: bold; }
-    """
+    # The editor command to use when a specific line number is requested. The
+    # string should contain two format specifiers: {line} and {filename}. If
+    # this parameter is not specified, the line number option to the %edit magic
+    # will be ignored.
+    editor_line = Str(config=True)
 
-    # Default prompts.
-    in_prompt = 'In [<span class="in-prompt-number">%i</span>]: '
-    out_prompt = 'Out[<span class="out-prompt-number">%i</span>]: '
+    # A CSS stylesheet. The stylesheet can contain classes for:
+    #     1. Qt: QPlainTextEdit, QFrame, QWidget, etc
+    #     2. Pygments: .c, .k, .o, etc (see PygmentsHighlighter)
+    #     3. IPython: .error, .in-prompt, .out-prompt, etc
+    style_sheet = Str(config=True)
+    
+    # If not empty, use this Pygments style for syntax highlighting. Otherwise,
+    # the style sheet is queried for Pygments style information.
+    syntax_style = Str(config=True)
+
+    # Prompts.
+    in_prompt = Str(default_in_prompt, config=True)
+    out_prompt = Str(default_out_prompt, config=True)
+    input_sep = Str(default_input_sep, config=True)
+    output_sep = Str(default_output_sep, config=True)
+    output_sep2 = Str(default_output_sep2, config=True)
 
     # FrontendWidget protected class variables.
-    #_input_splitter_class = IPythonInputSplitter
+    _input_splitter_class = IPythonInputSplitter
 
     # IPythonWidget protected class variables.
-    _payload_source_edit = 'IPython.zmq.zmqshell.ZMQInteractiveShell.edit_magic'
+    _PromptBlock = namedtuple('_PromptBlock', ['block', 'length', 'number'])
+    _payload_source_edit = zmq_shell_source + '.edit_magic'
+    _payload_source_exit = zmq_shell_source + '.ask_exit'
+    _payload_source_loadpy = zmq_shell_source + '.magic_loadpy'
     _payload_source_page = 'IPython.zmq.page.page'
 
     #---------------------------------------------------------------------------
@@ -74,15 +123,62 @@ class IPythonWidget(FrontendWidget):
         super(IPythonWidget, self).__init__(*args, **kw)
 
         # IPythonWidget protected variables.
+        self._code_to_load = None
+        self._payload_handlers = { 
+            self._payload_source_edit : self._handle_payload_edit,
+            self._payload_source_exit : self._handle_payload_exit,
+            self._payload_source_page : self._handle_payload_page,
+            self._payload_source_loadpy : self._handle_payload_loadpy }
         self._previous_prompt_obj = None
 
-        # Set a default editor and stylesheet.
-        self.set_editor('default')
-        self.reset_styling()
+        # Initialize widget styling.
+        if self.style_sheet:
+            self._style_sheet_changed()
+            self._syntax_style_changed()
+        else:
+            self.set_default_style()
 
     #---------------------------------------------------------------------------
     # 'BaseFrontendMixin' abstract interface
     #---------------------------------------------------------------------------
+
+    def _handle_complete_reply(self, rep):
+        """ Reimplemented to support IPython's improved completion machinery.
+        """
+        cursor = self._get_cursor()
+        info = self._request_info.get('complete')
+        if info and info.id == rep['parent_header']['msg_id'] and \
+                info.pos == cursor.position():
+            matches = rep['content']['matches']
+            text = rep['content']['matched_text']
+            offset = len(text)
+
+            # Clean up matches with period and path separators if the matched
+            # text has not been transformed. This is done by truncating all
+            # but the last component and then suitably decreasing the offset
+            # between the current cursor position and the start of completion.
+            if len(matches) > 1 and matches[0][:offset] == text:
+                parts = re.split(r'[./\\]', text) 
+                sep_count = len(parts) - 1
+                if sep_count:
+                    chop_length = sum(map(len, parts[:sep_count])) + sep_count
+                    matches = [ match[chop_length:] for match in matches ]
+                    offset -= chop_length
+
+            # Move the cursor to the start of the match and complete.
+            cursor.movePosition(QtGui.QTextCursor.Left, n=offset)
+            self._complete_with_items(cursor, matches)
+
+    def _handle_execute_reply(self, msg):
+        """ Reimplemented to support prompt requests.
+        """
+        info = self._request_info.get('execute')
+        if info and info.id == msg['parent_header']['msg_id']:
+            if info.kind == 'prompt':
+                number = msg['content']['execution_count'] + 1
+                self._show_interpreter_prompt(number)
+            else:
+                super(IPythonWidget, self)._handle_execute_reply(msg)
 
     def _handle_history_reply(self, msg):
         """ Implemented to handle history replies, which are only supported by
@@ -92,24 +188,15 @@ class IPythonWidget(FrontendWidget):
         items = [ history_dict[key] for key in sorted(history_dict.keys()) ]
         self._set_history(items)
 
-    def _handle_prompt_reply(self, msg):
-        """ Implemented to handle prompt number replies, which are only
-            supported by the IPython kernel.
-        """
-        content = msg['content']
-        self._show_interpreter_prompt(content['prompt_number'], 
-                                      content['input_sep'])
-
     def _handle_pyout(self, msg):
         """ Reimplemented for IPython-style "display hook".
         """
         if not self._hidden and self._is_from_this_session(msg):
             content = msg['content']
-            prompt_number = content['prompt_number']
-            self._append_plain_text(content['output_sep'])
+            prompt_number = content['execution_count']
+            self._append_plain_text(self.output_sep)
             self._append_html(self._make_out_prompt(prompt_number))
-            self._append_plain_text(content['data'] + '\n' + 
-                                    content['output_sep2'])
+            self._append_plain_text(content['data']+self.output_sep2)
 
     def _started_channels(self):
         """ Reimplemented to make a history request.
@@ -119,7 +206,21 @@ class IPythonWidget(FrontendWidget):
         #self.kernel_manager.xreq_channel.history(raw=True, output=False)
 
     #---------------------------------------------------------------------------
-    # 'FrontendWidget' interface
+    # 'ConsoleWidget' public interface
+    #---------------------------------------------------------------------------
+
+    def copy(self):
+        """ Copy the currently selected text to the clipboard, removing prompts
+            if possible.
+        """
+        text = unicode(self._control.textCursor().selection().toPlainText())
+        if text:
+            lines = map(transform_ipy_prompt, text.splitlines())
+            text = '\n'.join(lines)
+            QtGui.QApplication.clipboard().setText(text)
+
+    #---------------------------------------------------------------------------
+    # 'FrontendWidget' public interface
     #---------------------------------------------------------------------------
 
     def execute_file(self, path, hidden=False):
@@ -131,10 +232,28 @@ class IPythonWidget(FrontendWidget):
     # 'FrontendWidget' protected interface
     #---------------------------------------------------------------------------
 
+    def _complete(self):
+        """ Reimplemented to support IPython's improved completion machinery.
+        """
+        # We let the kernel split the input line, so we *always* send an empty
+        # text field. Readline-based frontends do get a real text field which
+        # they can use.
+        text = ''
+        
+        # Send the completion request to the kernel
+        msg_id = self.kernel_manager.xreq_channel.complete(
+            text,                                    # text
+            self._get_input_buffer_cursor_line(),    # line
+            self._get_input_buffer_cursor_column(),  # cursor_pos
+            self.input_buffer)                       # block 
+        pos = self._get_cursor().position()
+        info = self._CompletionRequest(msg_id, pos)
+        self._request_info['complete'] = info
+
     def _get_banner(self):
         """ Reimplemented to return IPython's default banner.
         """
-        return default_banner + '\n'
+        return default_gui_banner
 
     def _process_execute_error(self, msg):
         """ Reimplemented for IPython-style traceback formatting.
@@ -155,46 +274,52 @@ class IPythonWidget(FrontendWidget):
             self._append_html(traceback)
         else:
             # This is the fallback for now, using plain text with ansi escapes
-            self._append_plain_text(traceback)
+            self._append_plain_text(traceback)    
 
     def _process_execute_payload(self, item):
-        """ Reimplemented to handle %edit and paging payloads.
+        """ Reimplemented to dispatch payloads to handler methods.
         """
-        if item['source'] == self._payload_source_edit:
-            self._edit(item['filename'], item['line_number'])
-            return True
-        elif item['source'] == self._payload_source_page:
-            self._page(item['data'])
-            return True
-        else:
+        handler = self._payload_handlers.get(item['source'])
+        if handler is None:
+            # We have no handler for this type of payload, simply ignore it
             return False
-
-    def _show_interpreter_prompt(self, number=None, input_sep='\n'):
+        else:
+            handler(item)
+            return True
+        
+    def _show_interpreter_prompt(self, number=None):
         """ Reimplemented for IPython-style prompts.
         """
         # If a number was not specified, make a prompt number request.
         if number is None:
-            self.kernel_manager.xreq_channel.prompt()
+            msg_id = self.kernel_manager.xreq_channel.execute('', silent=True)
+            info = self._ExecutionRequest(msg_id, 'prompt')
+            self._request_info['execute'] = info
             return
 
         # Show a new prompt and save information about it so that it can be
         # updated later if the prompt number turns out to be wrong.
-        self._append_plain_text(input_sep)
+        self._prompt_sep = self.input_sep
         self._show_prompt(self._make_in_prompt(number), html=True)
         block = self._control.document().lastBlock()
         length = len(self._prompt)
-        self._previous_prompt_obj = IPythonPromptBlock(block, length, number)
+        self._previous_prompt_obj = self._PromptBlock(block, length, number)
 
         # Update continuation prompt to reflect (possibly) new prompt length.
         self._set_continuation_prompt(
             self._make_continuation_prompt(self._prompt), html=True)
+
+        # Load code from the %loadpy magic, if necessary.
+        if self._code_to_load is not None:
+            self.input_buffer = dedent(unicode(self._code_to_load).rstrip())
+            self._code_to_load = None
 
     def _show_interpreter_prompt_for_reply(self, msg):
         """ Reimplemented for IPython-style prompts.
         """
         # Update the old prompt number if necessary.
         content = msg['content']
-        previous_prompt_number = content['prompt_number']
+        previous_prompt_number = content['execution_count']
         if self._previous_prompt_obj and \
                 self._previous_prompt_obj.number != previous_prompt_number:
             block = self._previous_prompt_obj.block
@@ -218,67 +343,27 @@ class IPythonWidget(FrontendWidget):
             self._previous_prompt_obj = None
 
         # Show a new prompt with the kernel's estimated prompt number.
-        next_prompt = content['next_prompt']
-        self._show_interpreter_prompt(next_prompt['prompt_number'], 
-                                      next_prompt['input_sep'])
+        self._show_interpreter_prompt(previous_prompt_number + 1)
 
     #---------------------------------------------------------------------------
     # 'IPythonWidget' interface
     #---------------------------------------------------------------------------
 
-    def reset_styling(self):
-        """ Restores the default IPythonWidget styling.
-        """
-        self.set_styling(self.default_stylesheet, syntax_style='default')
-        #self.set_styling(self.dark_stylesheet, syntax_style='monokai')
-
-    def set_editor(self, editor, line_editor=None):
-        """ Sets the editor to use with the %edit magic.
+    def set_default_style(self, lightbg=True):
+        """ Sets the widget style to the class defaults.
 
         Parameters:
         -----------
-        editor : str
-            A command for invoking a system text editor. If the string contains
-            a {filename} format specifier, it will be used. Otherwise, the 
-            filename will be appended to the end the command.
-
-            This parameter also takes a special value:
-                'custom'  : Emit a 'custom_edit_requested(str, int)' signal 
-                            instead of opening an editor.
-
-        line_editor : str, optional
-            The editor command to use when a specific line number is
-            requested. The string should contain two format specifiers: {line}
-            and {filename}. If this parameter is not specified, the line number
-            option to the %edit magic will be ignored.
+        lightbg : bool, optional (default True)
+            Whether to use the default IPython light background or dark
+            background style.
         """
-        self._editor = editor
-        self._editor_line = line_editor
-
-    def set_styling(self, stylesheet, syntax_style=None):
-        """ Sets the IPythonWidget styling.
-
-        Parameters:
-        -----------
-        stylesheet : str
-            A CSS stylesheet. The stylesheet can contain classes for:
-                1. Qt: QPlainTextEdit, QFrame, QWidget, etc
-                2. Pygments: .c, .k, .o, etc (see PygmentsHighlighter)
-                3. IPython: .error, .in-prompt, .out-prompt, etc.
-
-        syntax_style : str or None [default None]
-            If specified, use the Pygments style with given name. Otherwise, 
-            the stylesheet is queried for Pygments style information.
-        """
-        self.setStyleSheet(stylesheet)
-        self._control.document().setDefaultStyleSheet(stylesheet)
-        if self._page_control:
-            self._page_control.document().setDefaultStyleSheet(stylesheet)
-
-        if syntax_style is None:
-            self._highlighter.set_style_sheet(stylesheet)
+        if lightbg:
+            self.style_sheet = default_light_style_sheet
+            self.syntax_style = default_light_syntax_style
         else:
-            self._highlighter.set_style(syntax_style)
+            self.style_sheet = default_dark_style_sheet
+            self.syntax_style = default_dark_syntax_style
 
     #---------------------------------------------------------------------------
     # 'IPythonWidget' protected interface
@@ -295,21 +380,21 @@ class IPythonWidget(FrontendWidget):
         line : int, optional
             A line of interest in the file.
         """
-        if self._editor == 'custom':
+        if self.custom_edit:
             self.custom_edit_requested.emit(filename, line)
-        elif self._editor == 'default':
+        elif self.editor == 'default':
             self._append_plain_text('No default editor available.\n')
         else:
             try:
                 filename = '"%s"' % filename
-                if line and self._editor_line:
-                    command = self._editor_line.format(filename=filename,
-                                                       line=line)
+                if line and self.editor_line:
+                    command = self.editor_line.format(filename=filename,
+                                                      line=line)
                 else:
                     try:
-                        command = self._editor.format()
+                        command = self.editor.format()
                     except KeyError:
-                        command = self._editor.format(filename=filename)
+                        command = self.editor.format(filename=filename)
                     else:
                         command += ' ' + filename
             except KeyError:
@@ -341,3 +426,51 @@ class IPythonWidget(FrontendWidget):
         """
         body = self.out_prompt % number
         return '<span class="out-prompt">%s</span>' % body
+
+    #------ Payload handlers --------------------------------------------------
+
+    # Payload handlers with a generic interface: each takes the opaque payload
+    # dict, unpacks it and calls the underlying functions with the necessary
+    # arguments.
+
+    def _handle_payload_edit(self, item):
+        self._edit(item['filename'], item['line_number'])
+
+    def _handle_payload_exit(self, item):
+        self.exit_requested.emit()
+
+    def _handle_payload_loadpy(self, item):
+        # Simple save the text of the .py file for later. The text is written
+        # to the buffer when _prompt_started_hook is called.
+        self._code_to_load = item['text']
+
+    def _handle_payload_page(self, item):
+        # Since the plain text widget supports only a very small subset of HTML
+        # and we have no control over the HTML source, we only page HTML
+        # payloads in the rich text widget.
+        if item['html'] and self.kind == 'rich':
+            self._page(item['html'], html=True)
+        else:
+            self._page(item['text'], html=False)
+
+    #------ Trait change handlers ---------------------------------------------
+
+    def _style_sheet_changed(self):
+        """ Set the style sheets of the underlying widgets.
+        """
+        self.setStyleSheet(self.style_sheet)
+        self._control.document().setDefaultStyleSheet(self.style_sheet)
+        if self._page_control:
+            self._page_control.document().setDefaultStyleSheet(self.style_sheet)
+
+        bg_color = self._control.palette().background().color()
+        self._ansi_processor.set_background_color(bg_color)
+
+    def _syntax_style_changed(self):
+        """ Set the style for the syntax highlighter.
+        """
+        if self.syntax_style:
+            self._highlighter.set_style(self.syntax_style)
+        else:
+            self._highlighter.set_style_sheet(self.style_sheet)
+        

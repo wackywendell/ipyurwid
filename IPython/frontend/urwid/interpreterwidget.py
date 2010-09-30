@@ -4,6 +4,7 @@
 import urwid
 import pygments.lexers
 import pygments.styles
+import pygments
 import pydoc
 
 from pywidget import *
@@ -25,8 +26,9 @@ class InterpreterWidget(urwid.Pile):
         # prompt
         
         self.formatter = UrwidFormatter()
-        self.lexer = pygments.lexers.get_lexer_by_name('python')
-        
+        self.lexer = pygments.lexers.get_lexer_by_name('python', stripall='True', ensurenl='False')
+        self.errlexer = pygments.lexers.get_lexer_by_name('pytb', stripall='True', ensurenl='False')
+
         self.inputbox = PromptPyEdit(multiline=True,lexer = self.lexer, formatter = self.formatter)
         self.inputwidget = urwid.Filler(self.inputbox, valign='top')
         
@@ -52,6 +54,22 @@ class InterpreterWidget(urwid.Pile):
     
     def set_input_caption(self, caption):
         self.inputbox.set_prompt(caption)
+    
+    def highlight(self, txt):
+        tkns = self.lexer.get_tokens(txt)
+        return list(self.formatter.formatgenerator(tkns))
+
+    def highlight_err(self, txt):
+        tkns = self.errlexer.get_tokens(txt)
+        return list(self.formatter.formatgenerator(tkns))
+
+    @property
+    def input_text(self):
+        return self.inputbox.text
+    
+    @input_text.setter
+    def input_text(self, newtxt):
+        self.inputbox.text = u''
         
     def set_style(self, s):
         if isinstance(s, basestring):

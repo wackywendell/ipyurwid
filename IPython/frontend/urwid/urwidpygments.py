@@ -111,4 +111,4 @@ class UrwidFormatter(Formatter):
     
     def format(self, tokensource, outfile):
         for (attr, tstring) in self.formatgenerator(tokensource):
-            outfile.write(attr, tstring)
+            outfile.write((attr, tstring))

@@ -486,7 +486,7 @@ class AssignSystemTransformer(PrefilterTransformer):
         if m is not None:
             cmd = m.group('cmd')
             lhs = m.group('lhs')
-            expr = make_quoted_expr("sc -l =%s" % cmd)
+            expr = make_quoted_expr("sc =%s" % cmd)
             new_line = '%s = get_ipython().magic(%s)' % (lhs, expr)
             return new_line
         return line
@@ -916,15 +916,7 @@ class AutoHandler(PrefilterHandler):
                     newcmd = '%s(%s)' % (ifun.rstrip(), the_rest)
 
         if auto_rewrite:
-            rw = self.shell.displayhook.prompt1.auto_rewrite() + newcmd
-            
-            try:
-                # plain ascii works better w/ pyreadline, on some machines, so
-                # we use it and only print uncolored rewrite if we have unicode
-                rw = str(rw)
-                print >>IPython.utils.io.Term.cout, rw
-            except UnicodeEncodeError:
-                print "-------------->" + newcmd
+            self.shell.auto_rewrite_input(newcmd)
             
         # log what is now valid Python, not the actual user input (without the
         # final newline)
@@ -960,7 +952,7 @@ class HelpHandler(PrefilterHandler):
                 #print 'line:<%r>' % line  # dbg
                 self.shell.magic_pinfo(line)
             else:
-                page.page(self.shell.usage, screen_lines=self.shell.usable_screen_length)
+                self.shell.show_usage()
             return '' # Empty string is needed here!
         except:
             raise

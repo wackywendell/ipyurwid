@@ -85,8 +85,7 @@ CTRL-W : Switch widget at the top'''
         
         self.widget.inputbox.text =u''
         
-        tkns = self.widget.lexer.get_tokens(txt.strip())
-        markup = list(self.widget.formatter.formatgenerator(tkns))
+        markup = self.widget.highlight(txt)
         
         #self.widget.add_to_output(('default','moretext:' + repr(markup) + '\n'))
         self.widget.add_to_output(markup) 

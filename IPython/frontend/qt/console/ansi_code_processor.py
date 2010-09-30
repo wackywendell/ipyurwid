@@ -1,39 +1,52 @@
+""" Utilities for processing ANSI escape codes and special ASCII characters.
+"""
+#-----------------------------------------------------------------------------
+# Imports
+#-----------------------------------------------------------------------------
+
 # Standard library imports
+from collections import namedtuple
 import re
 
 # System library imports
 from PyQt4 import QtCore, QtGui
 
+#-----------------------------------------------------------------------------
+# Constants and datatypes
+#-----------------------------------------------------------------------------
 
-class AnsiAction(object):
-    """ Represents an action requested by an ANSI escape sequence.
-    """
-    def __init__(self, kind):
-        self.kind = kind
+# An action for erase requests (ED and EL commands).
+EraseAction = namedtuple('EraseAction', ['action', 'area', 'erase_to'])
 
-class MoveAction(AnsiAction):
-    """ An AnsiAction for cursor move requests (CUU, CUD, CUF, CUB, CNL, CPL, 
-        CHA, and CUP commands).
-    """
-    def __init__(self):
-        raise NotImplementedError
+# An action for cursor move requests (CUU, CUD, CUF, CUB, CNL, CPL, CHA, CUP,
+# and HVP commands).
+# FIXME: Not implemented in AnsiCodeProcessor.
+MoveAction = namedtuple('MoveAction', ['action', 'dir', 'unit', 'count'])
 
-class EraseAction(AnsiAction):
-    """ An AnsiAction for erase requests (ED and EL commands).
-    """
-    def __init__(self, area, erase_to):
-        super(EraseAction, self).__init__('erase')
-        self.area = area
-        self.erase_to = erase_to
+# An action for scroll requests (SU and ST) and form feeds.
+ScrollAction = namedtuple('ScrollAction', ['action', 'dir', 'unit', 'count'])
 
+#-----------------------------------------------------------------------------
+# Classes
+#-----------------------------------------------------------------------------
 
 class AnsiCodeProcessor(object):
-    """ Translates ANSI escape codes into readable attributes.
+    """ Translates special ASCII characters and ANSI escape codes into readable
+        attributes.
     """
+
+    # Whether to increase intensity or set boldness for SGR code 1.
+    # (Different terminals handle this in different ways.)
+    bold_text_enabled = False    
 
     # Protected class variables.
     _ansi_commands = 'ABCDEFGHJKSTfmnsu'
     _ansi_pattern = re.compile('\x01?\x1b\[(.*?)([%s])\x02?' % _ansi_commands)
+    _special_pattern = re.compile('([\f])')
+
+    #---------------------------------------------------------------------------
+    # AnsiCodeProcessor interface
+    #---------------------------------------------------------------------------
 
     def __init__(self):
         self.actions = []
@@ -56,7 +69,8 @@ class AnsiCodeProcessor(object):
         start = 0
 
         for match in self._ansi_pattern.finditer(string):
-            substring = string[start:match.start()]
+            raw = string[start:match.start()]
+            substring = self._special_pattern.sub(self._replace_special, raw)
             if substring or self.actions:
                 yield substring
             start = match.end()
@@ -73,7 +87,8 @@ class AnsiCodeProcessor(object):
             else:
                 self.set_csi_code(match.group(2), params)
 
-        substring = string[start:]
+        raw = string[start:]
+        substring = self._special_pattern.sub(self._replace_special, raw)
         if substring or self.actions:
             yield substring
 
@@ -89,8 +104,11 @@ class AnsiCodeProcessor(object):
             The parameter codes for the command.
         """
         if command == 'm':   # SGR - Select Graphic Rendition
-            for code in params:
-                self.set_sgr_code(code)
+            if params:
+                for code in params:
+                    self.set_sgr_code(code)
+            else:
+                self.set_sgr_code(0)
 
         elif (command == 'J' or # ED - Erase Data
               command == 'K'):  # EL - Erase in Line
@@ -103,7 +121,13 @@ class AnsiCodeProcessor(object):
                     erase_to = 'start'
                 elif code == 2:
                     erase_to = 'all'
-                self.actions.append(EraseAction(area, erase_to))
+                self.actions.append(EraseAction('erase', area, erase_to))
+
+        elif (command == 'S' or # SU - Scroll Up
+              command == 'T'):  # SD - Scroll Down
+            dir = 'up' if command == 'S' else 'down'
+            count = params[0] if params else 1
+            self.actions.append(ScrollAction('scroll', dir, 'line', count))
         
     def set_sgr_code(self, code):
         """ Set attributes based on SGR (Select Graphic Rendition) code.
@@ -111,8 +135,10 @@ class AnsiCodeProcessor(object):
         if code == 0:
             self.reset_sgr()
         elif code == 1:
-            self.intensity = 1
-            self.bold = True
+            if self.bold_text_enabled:
+                self.bold = True
+            else:
+                self.intensity = 1
         elif code == 2:
             self.intensity = 0
         elif code == 3:
@@ -134,6 +160,16 @@ class AnsiCodeProcessor(object):
             self.background_color = code - 40
         elif code == 49:
             self.background_color = None
+
+    #---------------------------------------------------------------------------
+    # Protected interface
+    #---------------------------------------------------------------------------
+
+    def _replace_special(self, match):
+        special = match.group(1)
+        if special == '\f':
+            self.actions.append(ScrollAction('scroll', 'down', 'page', 1))
+        return ''
         
 
 class QtAnsiCodeProcessor(AnsiCodeProcessor):
@@ -141,15 +177,19 @@ class QtAnsiCodeProcessor(AnsiCodeProcessor):
     """
 
     # A map from color codes to RGB colors.
-    ansi_colors = (# Normal,      Bright/Light    ANSI color code
+    default_map = (# Normal,      Bright/Light    ANSI color code
                    ('black',      'grey'),        # 0: black
                    ('darkred',    'red'),         # 1: red
-                   ('darkgreen',  'green'),       # 2: green
-                   ('gold',       'yellow'),      # 3: yellow
-                   ('darkblue',   'blue'),        # 4: blue
+                   ('darkgreen',  'lime'),        # 2: green
+                   ('brown',      'yellow'),      # 3: yellow
+                   ('darkblue',   'deepskyblue'), # 4: blue
                    ('darkviolet', 'magenta'),     # 5: magenta
                    ('steelblue',  'cyan'),        # 6: cyan
                    ('grey',       'white'))       # 7: white
+
+    def __init__(self):
+        super(QtAnsiCodeProcessor, self).__init__()
+        self.color_map = self.default_map
     
     def get_format(self):
         """ Returns a QTextCharFormat that encodes the current style attributes.
@@ -158,12 +198,12 @@ class QtAnsiCodeProcessor(AnsiCodeProcessor):
 
         # Set foreground color
         if self.foreground_color is not None:
-            color = self.ansi_colors[self.foreground_color][self.intensity]
+            color = self.color_map[self.foreground_color][self.intensity]
             format.setForeground(QtGui.QColor(color))
 
         # Set background color
         if self.background_color is not None:
-            color = self.ansi_colors[self.background_color][self.intensity]
+            color = self.color_map[self.background_color][self.intensity]
             format.setBackground(QtGui.QColor(color))
 
         # Set font weight/style options
@@ -175,3 +215,19 @@ class QtAnsiCodeProcessor(AnsiCodeProcessor):
         format.setFontUnderline(self.underline)
 
         return format
+
+    def set_background_color(self, color):
+        """ Given a background color (a QColor), attempt to set a color map
+            that will be aesthetically pleasing.
+        """
+        if color.value() < 127:
+            # Colors appropriate for a terminal with a dark background.
+            self.color_map = self.default_map
+
+        else:
+            # Colors appropriate for a terminal with a light background. For 
+            # now, only use non-bright colors...
+            self.color_map = [ (pair[0], pair[0]) for pair in self.default_map ]
+
+            # ...and replace white with black.
+            self.color_map[7] = ('black', 'black')

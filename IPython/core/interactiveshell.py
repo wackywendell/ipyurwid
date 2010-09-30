@@ -18,7 +18,9 @@ from __future__ import with_statement
 from __future__ import absolute_import
 
 import __builtin__
+import __future__
 import abc
+import atexit
 import codeop
 import exceptions
 import new
@@ -32,6 +34,7 @@ from contextlib import nested
 from IPython.config.configurable import Configurable
 from IPython.core import debugger, oinspect
 from IPython.core import history as ipcorehist
+from IPython.core import page
 from IPython.core import prefilter
 from IPython.core import shadowns
 from IPython.core import ultratb
@@ -39,15 +42,16 @@ from IPython.core.alias import AliasManager
 from IPython.core.builtin_trap import BuiltinTrap
 from IPython.core.display_trap import DisplayTrap
 from IPython.core.displayhook import DisplayHook
-from IPython.core.error import UsageError
+from IPython.core.error import TryNext, UsageError
 from IPython.core.extensions import ExtensionManager
 from IPython.core.fakemodule import FakeModule, init_fakemod_dict
 from IPython.core.inputlist import InputList
+from IPython.core.inputsplitter import IPythonInputSplitter
 from IPython.core.logger import Logger
 from IPython.core.magic import Magic
 from IPython.core.payload import PayloadManager
 from IPython.core.plugin import PluginManager
-from IPython.core.prefilter import PrefilterManager
+from IPython.core.prefilter import PrefilterManager, ESC_MAGIC
 from IPython.external.Itpl import ItplNS
 from IPython.utils import PyColorize
 from IPython.utils import io
@@ -56,17 +60,14 @@ from IPython.utils.doctestreload import doctest_reload
 from IPython.utils.io import ask_yes_no, rprint
 from IPython.utils.ipstruct import Struct
 from IPython.utils.path import get_home_dir, get_ipython_dir, HomeDirError
-from IPython.utils.process import getoutput, getoutputerror
+from IPython.utils.process import system, getoutput
 from IPython.utils.strdispatch import StrDispatch
 from IPython.utils.syspathcontext import prepended_to_syspath
-from IPython.utils.text import num_ini_spaces
+from IPython.utils.text import num_ini_spaces, format_screen, LSString, SList
 from IPython.utils.traitlets import (Int, Str, CBool, CaselessStrEnum, Enum,
                                      List, Unicode, Instance, Type)
 from IPython.utils.warn import warn, error, fatal
 import IPython.core.hooks
-
-# from IPython.utils import growl
-# growl.start("IPython")
 
 #-----------------------------------------------------------------------------
 # Globals
@@ -151,14 +152,21 @@ class InteractiveShell(Configurable, Magic):
     debug = CBool(False, config=True)
     deep_reload = CBool(False, config=True)
     displayhook_class = Type(DisplayHook)
+    exit_now = CBool(False)
     filename = Str("<ipython console>")
     ipython_dir= Unicode('', config=True) # Set to get_ipython_dir() in __init__
+
+    # Input splitter, to split entire cells of input into either individual
+    # interactive statements or whole blocks.
+    input_splitter = Instance('IPython.core.inputsplitter.IPythonInputSplitter',
+                              (), {})
     logstart = CBool(False, config=True)
     logfile = Str('', config=True)
     logappend = Str('', config=True)
     object_info_string_level = Enum((0,1,2), default_value=0,
                                     config=True)
     pdb = CBool(False, config=True)
+
     pprint = CBool(True, config=True)
     profile = Str('', config=True)
     prompt_in1 = Str('In [\\#]: ', config=True)
@@ -194,10 +202,8 @@ class InteractiveShell(Configurable, Magic):
     # TODO: this part of prompt management should be moved to the frontends.
     # Use custom TraitTypes that convert '0'->'' and '\\n'->'\n'
     separate_in = SeparateStr('\n', config=True)
-    separate_out = SeparateStr('\n', config=True)
-    separate_out2 = SeparateStr('\n', config=True)
-    system_header = Str('IPython system call: ', config=True)
-    system_verbose = CBool(False, config=True)
+    separate_out = SeparateStr('', config=True)
+    separate_out2 = SeparateStr('', config=True)
     wildcards_case_sensitive = CBool(True, config=True)
     xmode = CaselessStrEnum(('Context','Plain', 'Verbose'), 
                             default_value='Context', config=True)
@@ -211,9 +217,12 @@ class InteractiveShell(Configurable, Magic):
     plugin_manager = Instance('IPython.core.plugin.PluginManager')
     payload_manager = Instance('IPython.core.payload.PayloadManager')
 
+    # Private interface
+    _post_execute = set()
+
     def __init__(self, config=None, ipython_dir=None,
                  user_ns=None, user_global_ns=None,
-                 custom_exceptions=((),None)):
+                 custom_exceptions=((), None)):
 
         # This is where traits with a config_key argument are updated
         # from the values on config.
@@ -222,6 +231,7 @@ class InteractiveShell(Configurable, Magic):
         # These are relatively independent and stateless
         self.init_ipython_dir(ipython_dir)
         self.init_instance_attrs()
+        self.init_environment()
 
         # Create namespaces (user_ns, user_global_ns, etc.)
         self.init_create_namespaces(user_ns, user_global_ns)
@@ -253,7 +263,7 @@ class InteractiveShell(Configurable, Magic):
         # pre_config_initialization
         self.init_shadow_hist()
 
-        # The next section should contain averything that was in ipmaker.
+        # The next section should contain everything that was in ipmaker.
         self.init_logstart()
 
         # The following was in post_config_initialization
@@ -261,6 +271,11 @@ class InteractiveShell(Configurable, Magic):
         # init_readline() must come before init_io(), because init_io uses
         # readline related things.
         self.init_readline()
+        # init_completer must come after init_readline, because it needs to
+        # know whether readline is present or not system-wide to configure the
+        # completers, since the completion machinery can now operate
+        # independently of readline (e.g. over the network)
+        self.init_completer()
         # TODO: init_io() needs to happen before init_traceback handlers
         # because the traceback handlers hardcode the stdout/stderr streams.
         # This logic in in debugger.Pdb and should eventually be changed.
@@ -275,6 +290,7 @@ class InteractiveShell(Configurable, Magic):
         self.init_plugin_manager()
         self.init_payload()
         self.hooks.late_startup_hook()
+        atexit.register(self.atexit_operations)
 
     @classmethod
     def instance(cls, *args, **kwargs):
@@ -284,7 +300,8 @@ class InteractiveShell(Configurable, Magic):
             # Now make sure that the instance will also be returned by
             # the subclasses instance attribute.
             for subclass in cls.mro():
-                if issubclass(cls, subclass) and issubclass(subclass, InteractiveShell):
+                if issubclass(cls, subclass) and \
+                       issubclass(subclass, InteractiveShell):
                     subclass._instance = inst
                 else:
                     break
@@ -380,6 +397,10 @@ class InteractiveShell(Configurable, Magic):
         # Indentation management
         self.indent_current_nsp = 0
 
+    def init_environment(self):
+        """Any changes we need to make to the user's environment."""
+        pass
+
     def init_encoding(self):
         # Get system encoding at startup time.  Certain terminals (like Emacs
         # under Win32 have it set to None, and we need to have a known valid
@@ -427,11 +448,13 @@ class InteractiveShell(Configurable, Magic):
                                             self.object_info_string_level)
 
     def init_io(self):
-        import IPython.utils.io
+        # This will just use sys.stdout and sys.stderr. If you want to
+        # override sys.stdout and sys.stderr themselves, you need to do that
+        # *before* instantiating this class, because Term holds onto 
+        # references to the underlying streams.
         if sys.platform == 'win32' and self.has_readline:
-            Term = io.IOTerm(
-                cout=self.readline._outputfile,cerr=self.readline._outputfile
-            )
+            Term = io.IOTerm(cout=self.readline._outputfile,
+                             cerr=self.readline._outputfile)
         else:
             Term = io.IOTerm()
         io.Term = Term
@@ -493,10 +516,6 @@ class InteractiveShell(Configurable, Magic):
                 setattr(sys, k, v)
         except AttributeError:
             pass
-        try:
-            delattr(sys, 'ipcompleter')
-        except AttributeError:
-            pass
         # Reset what what done in self.init_sys_modules
         try:
             sys.modules[self.user_ns['__name__']] = self._orig_sys_modules_main_name
@@ -547,7 +566,8 @@ class InteractiveShell(Configurable, Magic):
             
         dp = getattr(self.hooks, name, None)
         if name not in IPython.core.hooks.__all__:
-            print "Warning! Hook '%s' is not one of %s" % (name, IPython.core.hooks.__all__ )
+            print "Warning! Hook '%s' is not one of %s" % \
+                  (name, IPython.core.hooks.__all__ )
         if not dp:
             dp = IPython.core.hooks.CommandChainDispatcher()
         
@@ -558,6 +578,13 @@ class InteractiveShell(Configurable, Magic):
             dp = f
 
         setattr(self.hooks,name, dp)
+
+    def register_post_execute(self, func):
+        """Register a function for calling after code execution.
+        """
+        if not callable(func):
+            raise ValueError('argument %s must be callable' % func)
+        self._post_execute.add(func)
 
     #-------------------------------------------------------------------------
     # Things related to the "main" module
@@ -726,7 +753,8 @@ class InteractiveShell(Configurable, Magic):
         # These routines return properly built dicts as needed by the rest of
         # the code, and can also be used by extension writers to generate
         # properly initialized namespaces.
-        user_ns, user_global_ns = self.make_user_namespaces(user_ns, user_global_ns)
+        user_ns, user_global_ns = self.make_user_namespaces(user_ns,
+                                                            user_global_ns)
 
         # Assign namespaces
         # This is the namespace where all normal user variables live
@@ -957,13 +985,14 @@ class InteractiveShell(Configurable, Magic):
         self.alias_manager.init_aliases()
 
     def reset_selective(self, regex=None):
-        """Clear selective variables from internal namespaces based on a specified regular expression.
+        """Clear selective variables from internal namespaces based on a
+        specified regular expression.
 
         Parameters
         ----------
         regex : string or compiled pattern, optional
-            A regular expression pattern that will be used in searching variable names in the users 
-            namespaces.
+            A regular expression pattern that will be used in searching
+            variable names in the users namespaces.
         """
         if regex is not None:
             try:
@@ -983,12 +1012,12 @@ class InteractiveShell(Configurable, Magic):
         Parameters
         ----------
         variables : dict, str or list/tuple of str
-            The variables to inject into the user's namespace.  If a dict,
-            a simple update is done.  If a str, the string is assumed to 
-            have variable names separated by spaces.  A list/tuple of str
-            can also be used to give the variable names.  If just the variable
-            names are give (list/tuple/str) then the variable values looked
-            up in the callers frame.
+            The variables to inject into the user's namespace.  If a dict, a
+            simple update is done.  If a str, the string is assumed to have
+            variable names separated by spaces.  A list/tuple of str can also
+            be used to give the variable names.  If just the variable names are
+            give (list/tuple/str) then the variable values looked up in the
+            callers frame.
         interactive : bool
             If True (default), the variables will be listed with the ``who``
             magic.
@@ -1025,6 +1054,151 @@ class InteractiveShell(Configurable, Magic):
         else:
             for name,val in vdict.iteritems():
                 config_ns[name] = val
+
+    #-------------------------------------------------------------------------
+    # Things related to object introspection
+    #-------------------------------------------------------------------------
+
+    def _ofind(self, oname, namespaces=None):
+        """Find an object in the available namespaces.
+
+        self._ofind(oname) -> dict with keys: found,obj,ospace,ismagic
+
+        Has special code to detect magic functions.
+        """
+        #oname = oname.strip()
+        #print '1- oname: <%r>' % oname  # dbg
+        try:
+            oname = oname.strip().encode('ascii')
+            #print '2- oname: <%r>' % oname  # dbg
+        except UnicodeEncodeError:
+            print 'Python identifiers can only contain ascii characters.'
+            return dict(found=False)
+
+        alias_ns = None
+        if namespaces is None:
+            # Namespaces to search in:
+            # Put them in a list. The order is important so that we
+            # find things in the same order that Python finds them.
+            namespaces = [ ('Interactive', self.user_ns),
+                           ('IPython internal', self.internal_ns),
+                           ('Python builtin', __builtin__.__dict__),
+                           ('Alias', self.alias_manager.alias_table),
+                           ]
+            alias_ns = self.alias_manager.alias_table
+
+        # initialize results to 'null'
+        found = False; obj = None;  ospace = None;  ds = None;
+        ismagic = False; isalias = False; parent = None
+
+        # We need to special-case 'print', which as of python2.6 registers as a
+        # function but should only be treated as one if print_function was
+        # loaded with a future import.  In this case, just bail.
+        if (oname == 'print' and not (self.compile.compiler.flags &
+                                      __future__.CO_FUTURE_PRINT_FUNCTION)):
+            return {'found':found, 'obj':obj, 'namespace':ospace,
+                    'ismagic':ismagic, 'isalias':isalias, 'parent':parent}
+
+        # Look for the given name by splitting it in parts.  If the head is
+        # found, then we look for all the remaining parts as members, and only
+        # declare success if we can find them all.
+        oname_parts = oname.split('.')
+        oname_head, oname_rest = oname_parts[0],oname_parts[1:]
+        for nsname,ns in namespaces:
+            try:
+                obj = ns[oname_head]
+            except KeyError:
+                continue
+            else:
+                #print 'oname_rest:', oname_rest  # dbg
+                for part in oname_rest:
+                    try:
+                        parent = obj
+                        obj = getattr(obj,part)
+                    except:
+                        # Blanket except b/c some badly implemented objects
+                        # allow __getattr__ to raise exceptions other than
+                        # AttributeError, which then crashes IPython.
+                        break
+                else:
+                    # If we finish the for loop (no break), we got all members
+                    found = True
+                    ospace = nsname
+                    if ns == alias_ns:
+                        isalias = True
+                    break  # namespace loop
+
+        # Try to see if it's magic
+        if not found:
+            if oname.startswith(ESC_MAGIC):
+                oname = oname[1:]
+            obj = getattr(self,'magic_'+oname,None)
+            if obj is not None:
+                found = True
+                ospace = 'IPython internal'
+                ismagic = True
+
+        # Last try: special-case some literals like '', [], {}, etc:
+        if not found and oname_head in ["''",'""','[]','{}','()']:
+            obj = eval(oname_head)
+            found = True
+            ospace = 'Interactive'
+
+        return {'found':found, 'obj':obj, 'namespace':ospace,
+                'ismagic':ismagic, 'isalias':isalias, 'parent':parent}
+
+    def _ofind_property(self, oname, info):
+        """Second part of object finding, to look for property details."""
+        if info.found:
+            # Get the docstring of the class property if it exists.
+            path = oname.split('.')
+            root = '.'.join(path[:-1])
+            if info.parent is not None:
+                try:
+                    target = getattr(info.parent, '__class__') 
+                    # The object belongs to a class instance. 
+                    try: 
+                        target = getattr(target, path[-1])
+                        # The class defines the object. 
+                        if isinstance(target, property):
+                            oname = root + '.__class__.' + path[-1]
+                            info = Struct(self._ofind(oname))
+                    except AttributeError: pass
+                except AttributeError: pass
+
+        # We return either the new info or the unmodified input if the object
+        # hadn't been found
+        return info
+
+    def _object_find(self, oname, namespaces=None):
+        """Find an object and return a struct with info about it."""
+        inf = Struct(self._ofind(oname, namespaces))
+        return Struct(self._ofind_property(oname, inf))
+        
+    def _inspect(self, meth, oname, namespaces=None, **kw):
+        """Generic interface to the inspector system.
+
+        This function is meant to be called by pdef, pdoc & friends."""
+        info = self._object_find(oname)
+        if info.found:
+            pmethod = getattr(self.inspector, meth)
+            formatter = format_screen if info.ismagic else None
+            if meth == 'pdoc':
+                pmethod(info.obj, oname, formatter)
+            elif meth == 'pinfo':
+                pmethod(info.obj, oname, formatter, info, **kw)
+            else:
+                pmethod(info.obj, oname)
+        else:
+            print 'Object `%s` not found.' % oname
+            return 'not found'  # so callers can take other action
+
+    def object_inspect(self, oname):
+        info = self._object_find(oname)
+        if info.found:
+            return self.inspector.info(info.obj, oname, info=info)
+        else:
+            return oinspect.object_info(name=oname, found=False)
 
     #-------------------------------------------------------------------------
     # Things related to history management
@@ -1143,7 +1317,8 @@ class InteractiveShell(Configurable, Magic):
         elif isinstance(index, tuple) and len(index) == 2:
             start=index[0]; stop=index[1]
         else:
-            raise IndexError('Not a valid index for the input history: %r' % index)
+            raise IndexError('Not a valid index for the input history: %r'
+                             % index)
         hist = {}
         for i in range(start, stop):
             if output:
@@ -1313,7 +1488,7 @@ class InteractiveShell(Configurable, Magic):
                         # the code computing the traceback.
                         if self.InteractiveTB.call_pdb:
                             # pdb mucks up readline, fix it back
-                            self.set_completer()
+                            self.set_readline_completer()
 
                 # Actually show the traceback
                 self._showtraceback(etype, value, stb)
@@ -1327,9 +1502,7 @@ class InteractiveShell(Configurable, Magic):
         Subclasses may override this method to put the traceback on a different
         place, like a side channel.
         """
-        # FIXME: this should use the proper write channels, but our test suite
-        # relies on it coming out of stdout...
-        print >> sys.stdout, self.InteractiveTB.stb2text(stb)
+        print >> io.Term.cout, self.InteractiveTB.stb2text(stb)
 
     def showsyntaxerror(self, filename=None):
         """Display the syntax error that just occurred.
@@ -1366,74 +1539,6 @@ class InteractiveShell(Configurable, Magic):
         self._showtraceback(etype, value, stb)
 
     #-------------------------------------------------------------------------
-    # Things related to tab completion
-    #-------------------------------------------------------------------------
-
-    def complete(self, text, line=None, cursor_pos=None):
-        """Return a sorted list of all possible completions on text.
-
-        Parameters
-        ----------
-
-           text : string
-             A string of text to be completed on.
-
-           line : string, optional
-             The complete line that text is part of.
-
-           cursor_pos : int, optional
-             The position of the cursor on the input line.
-
-        The optional arguments allow the completion to take more context into
-        account, and are part of the low-level completion API.
-        
-        This is a wrapper around the completion mechanism, similar to what
-        readline does at the command line when the TAB key is hit.  By
-        exposing it as a method, it can be used by other non-readline
-        environments (such as GUIs) for text completion.
-
-        Simple usage example:
-
-        In [7]: x = 'hello'
-
-        In [8]: x
-        Out[8]: 'hello'
-
-        In [9]: print x
-        hello
-
-        In [10]: _ip.complete('x.l')
-        Out[10]: ['x.ljust', 'x.lower', 'x.lstrip']
-        """
-
-        # Inject names into __builtin__ so we can complete on the added names.
-        with self.builtin_trap:
-            return self.Completer.complete(text,line_buffer=text)
-
-    def set_custom_completer(self,completer,pos=0):
-        """Adds a new custom completer function.
-
-        The position argument (defaults to 0) is the index in the completers
-        list where you want the completer to be inserted."""
-
-        newcomp = new.instancemethod(completer,self.Completer,
-                                     self.Completer.__class__)
-        self.Completer.matchers.insert(pos,newcomp)
-
-    def set_completer(self):
-        """Reset readline's completer to be our own."""
-        self.readline.set_completer(self.Completer.rlcomplete)
-
-    def set_completer_frame(self, frame=None):
-        """Set the frame of the completer."""
-        if frame:
-            self.Completer.namespace = frame.f_locals
-            self.Completer.global_namespace = frame.f_globals
-        else:
-            self.Completer.namespace = self.user_ns
-            self.Completer.global_namespace = self.user_global_ns
-
-    #-------------------------------------------------------------------------
     # Things related to readline
     #-------------------------------------------------------------------------
 
@@ -1452,7 +1557,7 @@ class InteractiveShell(Configurable, Magic):
             # Set a number of methods that depend on readline to be no-op
             self.savehist = no_op
             self.reloadhist = no_op
-            self.set_completer = no_op
+            self.set_readline_completer = no_op
             self.set_custom_completer = no_op
             self.set_completer_frame = no_op
             warn('Readline services not available or not loaded.')
@@ -1460,18 +1565,12 @@ class InteractiveShell(Configurable, Magic):
             self.has_readline = True
             self.readline = readline
             sys.modules['readline'] = readline
-            import atexit
-            from IPython.core.completer import IPCompleter
-            self.Completer = IPCompleter(self,
-                                         self.user_ns,
-                                         self.user_global_ns,
-                                         self.readline_omit__names,
-                                         self.alias_manager.alias_table)
-            sdisp = self.strdispatchers.get('complete_command', StrDispatch())
-            self.strdispatchers['complete_command'] = sdisp
-            self.Completer.custom_completers = sdisp
+            
             # Platform-specific configuration
             if os.name == 'nt':
+                # FIXME - check with Frederick to see if we can harmonize
+                # naming conventions with pyreadline to avoid this
+                # platform-dependent check
                 self.readline_startup_hook = readline.set_pre_input_hook
             else:
                 self.readline_startup_hook = readline.set_startup_hook
@@ -1493,10 +1592,6 @@ class InteractiveShell(Configurable, Magic):
                     warn('Problems reading readline initialization file <%s>'
                          % inputrc_name)
             
-            # save this in sys so embedded copies can restore it properly
-            sys.ipcompleter = self.Completer.rlcomplete
-            self.set_completer()
-
             # Configure readline according to user's prefs
             # This is only done if GNU readline is being used.  If libedit
             # is being used (as on Leopard) the readline config is
@@ -1511,6 +1606,7 @@ class InteractiveShell(Configurable, Magic):
             delims = readline.get_completer_delims().encode("ascii", "ignore")
             delims = delims.translate(string._idmap,
                                       self.readline_remove_delims)
+            delims = delims.replace(ESC_MAGIC, '')
             readline.set_completer_delims(delims)
             # otherwise we end up with a monster history after a while:
             readline.set_history_length(1000)
@@ -1520,8 +1616,9 @@ class InteractiveShell(Configurable, Magic):
             except IOError:
                 pass  # It doesn't exist yet.
 
-            atexit.register(self.atexit_operations)
-            del atexit
+            # If we have readline, we want our history saved upon ipython
+            # exiting. 
+            atexit.register(self.savehist)
 
         # Configure auto-indent for all platforms
         self.set_autoindent(self.autoindent)
@@ -1556,6 +1653,113 @@ class InteractiveShell(Configurable, Magic):
         return self.indent_current_nsp * ' '
 
     #-------------------------------------------------------------------------
+    # Things related to text completion
+    #-------------------------------------------------------------------------
+
+    def init_completer(self):
+        """Initialize the completion machinery.
+
+        This creates completion machinery that can be used by client code,
+        either interactively in-process (typically triggered by the readline
+        library), programatically (such as in test suites) or out-of-prcess
+        (typically over the network by remote frontends).
+        """
+        from IPython.core.completer import IPCompleter
+        from IPython.core.completerlib import (module_completer,
+                                               magic_run_completer, cd_completer)
+        
+        self.Completer = IPCompleter(self,
+                                     self.user_ns,
+                                     self.user_global_ns,
+                                     self.readline_omit__names,
+                                     self.alias_manager.alias_table,
+                                     self.has_readline)
+        
+        # Add custom completers to the basic ones built into IPCompleter
+        sdisp = self.strdispatchers.get('complete_command', StrDispatch())
+        self.strdispatchers['complete_command'] = sdisp
+        self.Completer.custom_completers = sdisp
+
+        self.set_hook('complete_command', module_completer, str_key = 'import')
+        self.set_hook('complete_command', module_completer, str_key = 'from')
+        self.set_hook('complete_command', magic_run_completer, str_key = '%run')
+        self.set_hook('complete_command', cd_completer, str_key = '%cd')
+
+        # Only configure readline if we truly are using readline.  IPython can
+        # do tab-completion over the network, in GUIs, etc, where readline
+        # itself may be absent
+        if self.has_readline:
+            self.set_readline_completer()
+
+    def complete(self, text, line=None, cursor_pos=None):
+        """Return the completed text and a list of completions.
+
+        Parameters
+        ----------
+
+           text : string
+             A string of text to be completed on.  It can be given as empty and
+             instead a line/position pair are given.  In this case, the
+             completer itself will split the line like readline does.
+
+           line : string, optional
+             The complete line that text is part of.
+
+           cursor_pos : int, optional
+             The position of the cursor on the input line.
+
+        Returns
+        -------
+          text : string
+            The actual text that was completed.
+
+          matches : list
+            A sorted list with all possible completions.
+
+        The optional arguments allow the completion to take more context into
+        account, and are part of the low-level completion API.
+        
+        This is a wrapper around the completion mechanism, similar to what
+        readline does at the command line when the TAB key is hit.  By
+        exposing it as a method, it can be used by other non-readline
+        environments (such as GUIs) for text completion.
+
+        Simple usage example:
+
+        In [1]: x = 'hello'
+
+        In [2]: _ip.complete('x.l')
+        Out[2]: ('x.l', ['x.ljust', 'x.lower', 'x.lstrip'])
+        """
+
+        # Inject names into __builtin__ so we can complete on the added names.
+        with self.builtin_trap:
+            return self.Completer.complete(text, line, cursor_pos)
+
+    def set_custom_completer(self, completer, pos=0):
+        """Adds a new custom completer function.
+
+        The position argument (defaults to 0) is the index in the completers
+        list where you want the completer to be inserted."""
+
+        newcomp = new.instancemethod(completer,self.Completer,
+                                     self.Completer.__class__)
+        self.Completer.matchers.insert(pos,newcomp)
+
+    def set_readline_completer(self):
+        """Reset readline's completer to be our own."""
+        self.readline.set_completer(self.Completer.rlcomplete)
+
+    def set_completer_frame(self, frame=None):
+        """Set the frame of the completer."""
+        if frame:
+            self.Completer.namespace = frame.f_locals
+            self.Completer.global_namespace = frame.f_globals
+        else:
+            self.Completer.namespace = self.user_ns
+            self.Completer.global_namespace = self.user_global_ns
+
+    #-------------------------------------------------------------------------
     # Things related to magics
     #-------------------------------------------------------------------------
 
@@ -1571,8 +1775,8 @@ class InteractiveShell(Configurable, Magic):
     def magic(self,arg_s):
         """Call a magic function by name.
 
-        Input: a string containing the name of the magic function to call and any
-        additional arguments to be passed to the magic.
+        Input: a string containing the name of the magic function to call and
+        any additional arguments to be passed to the magic.
 
         magic('name -opt foo bar') is equivalent to typing at the ipython
         prompt:
@@ -1649,8 +1853,46 @@ class InteractiveShell(Configurable, Magic):
     #-------------------------------------------------------------------------
 
     def system(self, cmd):
-        """Make a system call, using IPython."""
-        return self.hooks.shell_hook(self.var_expand(cmd, depth=2))
+        """Call the given cmd in a subprocess.
+
+        Parameters
+        ----------
+        cmd : str
+          Command to execute (can not end in '&', as bacground processes are
+          not supported.
+        """
+        # We do not support backgrounding processes because we either use
+        # pexpect or pipes to read from.  Users can always just call
+        # os.system() if they really want a background process.
+        if cmd.endswith('&'):
+            raise OSError("Background processes not supported.")
+
+        return system(self.var_expand(cmd, depth=2))
+
+    def getoutput(self, cmd, split=True):
+        """Get output (possibly including stderr) from a subprocess.
+
+        Parameters
+        ----------
+        cmd : str
+          Command to execute (can not end in '&', as background processes are
+          not supported.
+        split : bool, optional
+        
+          If True, split the output into an IPython SList.  Otherwise, an
+          IPython LSString is returned.  These are objects similar to normal
+          lists and strings, with a few convenience attributes for easier
+          manipulation of line-based output.  You can use '?' on them for
+          details.
+          """
+        if cmd.endswith('&'):
+            raise OSError("Background processes not supported.")
+        out = getoutput(self.var_expand(cmd, depth=2))
+        if split:
+            out = SList(out.splitlines())
+        else:
+            out = LSString(out)
+        return out
 
     #-------------------------------------------------------------------------
     # Things related to aliases
@@ -1687,6 +1929,88 @@ class InteractiveShell(Configurable, Magic):
         # for now, we should expose the main prefilter method (there's legacy
         # code out there that may rely on this).
         self.prefilter = self.prefilter_manager.prefilter_lines
+
+
+    def auto_rewrite_input(self, cmd):
+        """Print to the screen the rewritten form of the user's command.
+
+        This shows visual feedback by rewriting input lines that cause
+        automatic calling to kick in, like::
+
+          /f x
+
+        into::
+
+          ------> f(x)
+          
+        after the user's input prompt.  This helps the user understand that the
+        input line was transformed automatically by IPython.
+        """
+        rw = self.displayhook.prompt1.auto_rewrite() + cmd
+
+        try:
+            # plain ascii works better w/ pyreadline, on some machines, so
+            # we use it and only print uncolored rewrite if we have unicode
+            rw = str(rw)
+            print >> IPython.utils.io.Term.cout, rw
+        except UnicodeEncodeError:
+            print "------> " + cmd
+            
+    #-------------------------------------------------------------------------
+    # Things related to extracting values/expressions from kernel and user_ns
+    #-------------------------------------------------------------------------
+
+    def _simple_error(self):
+        etype, value = sys.exc_info()[:2]
+        return u'[ERROR] {e.__name__}: {v}'.format(e=etype, v=value)
+
+    def user_variables(self, names):
+        """Get a list of variable names from the user's namespace.
+
+        Parameters
+        ----------
+        names : list of strings
+          A list of names of variables to be read from the user namespace.
+
+        Returns
+        -------
+        A dict, keyed by the input names and with the repr() of each value.
+        """
+        out = {}
+        user_ns = self.user_ns
+        for varname in names:
+            try:
+                value = repr(user_ns[varname])
+            except:
+                value = self._simple_error()
+            out[varname] = value
+        return out
+        
+    def user_expressions(self, expressions):
+        """Evaluate a dict of expressions in the user's namespace.
+
+        Parameters
+        ----------
+        expressions : dict
+          A dict with string keys and string values.  The expression values
+          should be valid Python expressions, each of which will be evaluated
+          in the user namespace.
+        
+        Returns
+        -------
+        A dict, keyed like the input expressions dict, with the repr() of each
+        value.
+        """
+        out = {}
+        user_ns = self.user_ns
+        global_ns = self.user_global_ns
+        for key, expr in expressions.iteritems():
+            try:
+                value = repr(eval(expr, global_ns, user_ns))
+            except:
+                value = self._simple_error()
+            out[key] = value
+        return out
 
     #-------------------------------------------------------------------------
     # Things related to the running of code
@@ -1803,6 +2127,89 @@ class InteractiveShell(Configurable, Magic):
                 self.showtraceback()
                 warn('Unknown failure executing file: <%s>' % fname)
 
+    def run_cell(self, cell):
+        """Run the contents of an entire multiline 'cell' of code.
+
+        The cell is split into separate blocks which can be executed
+        individually.  Then, based on how many blocks there are, they are
+        executed as follows:
+
+        - A single block: 'single' mode.
+
+        If there's more than one block, it depends:
+
+        - if the last one is no more than two lines long, run all but the last
+        in 'exec' mode and the very last one in 'single' mode.  This makes it
+        easy to type simple expressions at the end to see computed values.  -
+        otherwise (last one is also multiline), run all in 'exec' mode
+
+        When code is executed in 'single' mode, :func:`sys.displayhook` fires,
+        results are displayed and output prompts are computed.  In 'exec' mode,
+        no results are displayed unless :func:`print` is called explicitly;
+        this mode is more akin to running a script.
+
+        Parameters
+        ----------
+        cell : str
+          A single or multiline string.
+        """
+        #################################################################
+        # FIXME
+        # =====
+        # This execution logic should stop calling runlines altogether, and
+        # instead we should do what runlines does, in a controlled manner, here
+        # (runlines mutates lots of state as it goes calling sub-methods that
+        # also mutate state).  Basically we should:
+        # - apply dynamic transforms for single-line input (the ones that
+        # split_blocks won't apply since they need context).
+        # - increment the global execution counter (we need to pull that out
+        # from outputcache's control; outputcache should instead read it from
+        # the main object).
+        # - do any logging of input
+        # - update histories (raw/translated)
+        # - then, call plain runsource (for single blocks, so displayhook is
+        # triggered) or runcode (for multiline blocks in exec mode).
+        #
+        # Once this is done, we'll be able to stop using runlines and we'll
+        # also have a much cleaner separation of logging, input history and
+        # output cache management.
+        #################################################################
+        
+        # We need to break up the input into executable blocks that can be run
+        # in 'single' mode, to provide comfortable user behavior.
+        blocks = self.input_splitter.split_blocks(cell)
+        
+        if not blocks:
+            return
+        
+        # Single-block input should behave like an interactive prompt
+        if len(blocks) == 1:
+            self.runlines(blocks[0])
+            return
+
+        # In multi-block input, if the last block is a simple (one-two lines)
+        # expression, run it in single mode so it produces output.  Otherwise
+        # just feed the whole thing to runcode.
+        # This seems like a reasonable usability design.
+        last = blocks[-1]
+        
+        # Note: below, whenever we call runcode, we must sync history
+        # ourselves, because runcode is NOT meant to manage history at all.
+        if len(last.splitlines()) < 2:
+            # Get the main body to run as a cell
+            body = ''.join(blocks[:-1])
+            self.input_hist.append(body)
+            self.input_hist_raw.append(body)
+            retcode = self.runcode(body, post_execute=False)
+            if retcode==0:
+                # And the last expression via runlines so it produces output
+                self.runlines(last)
+        else:
+            # Run the whole cell as one entity
+            self.input_hist.append(cell)
+            self.input_hist_raw.append(cell)
+            self.runcode(cell)
+
     def runlines(self, lines, clean=False):
         """Run a string of one or more lines of source.
 
@@ -1823,21 +2230,22 @@ class InteractiveShell(Configurable, Magic):
         self.resetbuffer()
         lines = lines.splitlines()
         more = 0
-
         with nested(self.builtin_trap, self.display_trap):
             for line in lines:
-                # skip blank lines so we don't mess up the prompt counter, but do
-                # NOT skip even a blank line if we are in a code block (more is
-                # true)
+                # skip blank lines so we don't mess up the prompt counter, but
+                # do NOT skip even a blank line if we are in a code block (more
+                # is true)
             
                 if line or more:
                     # push to raw history, so hist line numbers stay in sync
-                    self.input_hist_raw.append("# " + line + "\n")
-                    prefiltered = self.prefilter_manager.prefilter_lines(line,more)
+                    self.input_hist_raw.append(line + '\n')
+                    prefiltered = self.prefilter_manager.prefilter_lines(line,
+                                                                         more)
                     more = self.push_line(prefiltered)
                     # IPython's runsource returns None if there was an error
-                    # compiling the code.  This allows us to stop processing right
-                    # away, so the user gets the error message at the right place.
+                    # compiling the code.  This allows us to stop processing
+                    # right away, so the user gets the error message at the
+                    # right place.
                     if more is None:
                         break
                 else:
@@ -1876,13 +2284,18 @@ class InteractiveShell(Configurable, Magic):
         The return value can be used to decide whether to use sys.ps1 or
         sys.ps2 to prompt the next line."""
 
+        # We need to ensure that the source is unicode from here on.
+        if type(source)==str:
+            source = source.decode(self.stdin_encoding)
+        
         # if the source code has leading blanks, add 'if 1:\n' to it
         # this allows execution of indented pasted code. It is tempting
         # to add '\n' at the end of source to run commands like ' a=1'
         # directly, but this fails for more complicated scenarios
         #source=source.encode(self.stdin_encoding) # fixes unicode input issues
+
         if source[:1] in [' ', '\t']:
-            source = 'if 1:\n%s' % source
+            source = u'if 1:\n%s' % source
 
         try:
             code = self.compile(source,filename,symbol)
@@ -1907,7 +2320,7 @@ class InteractiveShell(Configurable, Magic):
         else:
             return None
 
-    def runcode(self,code_obj):
+    def runcode(self, code_obj, post_execute=True):
         """Execute a code object.
 
         When an exception occurs, self.showtraceback() is called to display a
@@ -1949,6 +2362,23 @@ class InteractiveShell(Configurable, Magic):
             outflag = 0
             if softspace(sys.stdout, 0):
                 print
+
+        # Execute any registered post-execution functions.  Here, any errors
+        # are reported only minimally and just on the terminal, because the
+        # main exception channel may be occupied with a user traceback.
+        # FIXME: we need to think this mechanism a little more carefully.
+        if post_execute:
+            for func in self._post_execute:
+                try:
+                    func()
+                except:
+                    head = '[ ERROR ] Evaluating post_execute function: %s' % \
+                           func
+                    print >> io.Term.cout, head
+                    print >> io.Term.cout, self._simple_error()
+                    print >> io.Term.cout, 'Removing from post_execute'
+                    self._post_execute.remove(func)
+
         # Flush out code object which has been run (and source)
         self.code_to_run = None
         return outflag
@@ -2051,16 +2481,6 @@ class InteractiveShell(Configurable, Magic):
     # Utilities
     #-------------------------------------------------------------------------
 
-    def getoutput(self, cmd):
-        return getoutput(self.var_expand(cmd,depth=2),
-                         header=self.system_header,
-                         verbose=self.system_verbose)
-
-    def getoutputerror(self, cmd):
-        return getoutputerror(self.var_expand(cmd,depth=2),
-                              header=self.system_header,
-                              verbose=self.system_verbose)
-
     def var_expand(self,cmd,depth=0):
         """Expand python variables in a string.
 
@@ -2111,18 +2531,25 @@ class InteractiveShell(Configurable, Magic):
         if self.quiet:
             return True
         return ask_yes_no(prompt,default)
+    
+    def show_usage(self):
+        """Show a usage message"""
+        page.page(IPython.core.usage.interactive_usage)
 
     #-------------------------------------------------------------------------
     # Things related to IPython exiting
     #-------------------------------------------------------------------------
-
     def atexit_operations(self):
         """This will be executed at the time of exit.
 
-        Saving of persistent data should be performed here.
-        """
-        self.savehist()
+        Cleanup operations and saving of persistent data that is done
+        unconditionally by IPython should be performed here.
 
+        For things that may depend on startup flags or platform specifics (such
+        as having readline or not), register a separate atexit function in the
+        code that has the appropriate information, rather than trying to
+        clutter 
+        """
         # Cleanup all tempfiles left around
         for tfile in self.tempfiles:
             try:
