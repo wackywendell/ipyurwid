@@ -22,13 +22,12 @@ import __future__
 import abc
 import atexit
 import codeop
-import exceptions
-import new
 import os
 import re
 import string
 import sys
 import tempfile
+import types
 from contextlib import nested
 
 from IPython.config.configurable import Configurable
@@ -102,7 +101,7 @@ def softspace(file, newvalue):
 
 def no_op(*a, **kw): pass
 
-class SpaceInInput(exceptions.Exception): pass
+class SpaceInInput(Exception): pass
 
 class Bunch: pass
 
@@ -512,7 +511,7 @@ class InteractiveShell(Configurable, Magic):
     def restore_sys_module_state(self):
         """Restore the state of the sys module."""
         try:
-            for k, v in self._orig_sys_module_state.items():
+            for k, v in self._orig_sys_module_state.iteritems():
                 setattr(sys, k, v)
         except AttributeError:
             pass
@@ -550,7 +549,7 @@ class InteractiveShell(Configurable, Magic):
         # accepts it.  Probably at least check that the hook takes the number
         # of args it's supposed to.
         
-        f = new.instancemethod(hook,self,self.__class__)
+        f = types.MethodType(hook, self)
 
         # check if the hook is for strdispatcher first
         if str_key is not None:
@@ -810,8 +809,11 @@ class InteractiveShell(Configurable, Magic):
 
         # Similarly, track all namespaces where references can be held and that
         # we can safely clear (so it can NOT include builtin).  This one can be
-        # a simple list.
-        self.ns_refs_table = [ user_ns, user_global_ns, self.user_ns_hidden,
+        # a simple list.  Note that the main execution namespaces, user_ns and
+        # user_global_ns, can NOT be listed here, as clearing them blindly
+        # causes errors in object __del__ methods.  Instead, the reset() method
+        # clears them manually and carefully.
+        self.ns_refs_table = [ self.user_ns_hidden,
                                self.internal_ns, self._main_ns_cache ]
 
     def make_user_namespaces(self, user_ns=None, user_global_ns=None):
@@ -968,9 +970,6 @@ class InteractiveShell(Configurable, Magic):
         Note that this is much more aggressive than %reset, since it clears
         fully all namespaces, as well as all input/output lists.
         """
-        for ns in self.ns_refs_table:
-            ns.clear()
-
         self.alias_manager.clear_aliases()
 
         # Clear input and output histories
@@ -978,9 +977,23 @@ class InteractiveShell(Configurable, Magic):
         self.input_hist_raw[:] = []
         self.output_hist.clear()
 
+        # Clear namespaces holding user references
+        for ns in self.ns_refs_table:
+            ns.clear()
+            
+        # The main execution namespaces must be cleared very carefully,
+        # skipping the deletion of the builtin-related keys, because doing so
+        # would cause errors in many object's __del__ methods.
+        for ns in [self.user_ns, self.user_global_ns]:
+            drop_keys = set(ns.keys())
+            drop_keys.discard('__builtin__')
+            drop_keys.discard('__builtins__')
+            for k in drop_keys:
+                del ns[k]
+
         # Restore the user namespaces to minimal usability
         self.init_user_ns()
-
+        
         # Restore the default and user aliases
         self.alias_manager.init_aliases()
 
@@ -1235,7 +1248,7 @@ class InteractiveShell(Configurable, Magic):
     def init_shadow_hist(self):
         try:
             self.db = pickleshare.PickleShareDB(self.ipython_dir + "/db")
-        except exceptions.UnicodeDecodeError:
+        except UnicodeDecodeError:
             print "Your ipython_dir can't be decoded to unicode!"
             print "Please set HOME environment variable to something that"
             print r"only has ASCII characters, e.g. c:\home"
@@ -1400,7 +1413,7 @@ class InteractiveShell(Configurable, Magic):
 
         if handler is None: handler = dummy_handler
 
-        self.CustomTB = new.instancemethod(handler,self,self.__class__)
+        self.CustomTB = types.MethodType(handler, self)
         self.custom_exceptions = exc_tuple
 
     def excepthook(self, etype, value, tb):
@@ -1742,8 +1755,7 @@ class InteractiveShell(Configurable, Magic):
         The position argument (defaults to 0) is the index in the completers
         list where you want the completer to be inserted."""
 
-        newcomp = new.instancemethod(completer,self.Completer,
-                                     self.Completer.__class__)
+        newcomp = types.MethodType(completer, self.Completer)
         self.Completer.matchers.insert(pos,newcomp)
 
     def set_readline_completer(self):
@@ -1814,12 +1826,11 @@ class InteractiveShell(Configurable, Magic):
             print 'Magic function. Passed parameter is between < >:'
             print '<%s>' % parameter_s
             print 'The self object is:',self
-    
+    newcomp = types.MethodType(completer, self.Completer)
         self.define_magic('foo',foo_impl)
         """
         
-        import new
-        im = new.instancemethod(func,self, self.__class__)
+        im = types.MethodType(func, self)
         old = getattr(self, "magic_" + magicname, None)
         setattr(self, "magic_" + magicname, im)
         return old
